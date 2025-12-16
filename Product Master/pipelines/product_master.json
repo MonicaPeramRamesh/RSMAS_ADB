@@ -1,0 +1,29 @@
+{
+  "name": "product_master",
+  "pipeline_type": "WORKSPACE",
+
+  "libraries": [
+    {
+      "glob": {
+        "include": "/Repos/RSMAS_ADB/dlt/product_master/transformations/**"
+      }
+    }
+  ],
+
+  "root_path": "/Repos/RSMAS_ADB/dlt/product_master",
+
+  "catalog": "dev_rsmas_catalog",
+  "schema": "rsmas_productmaster_schema",
+
+  "continuous": false,
+  "development": false,
+  "photon": true,
+  "serverless": true,
+  "channel": "CURRENT",
+
+  "configuration": {
+    "rsmas.catalog": "dev_rsmas_catalog",
+    "rsmas.schema": "rsmas_productmaster_schema",
+    "rsmas.secret.scope": "rsmas-dev-scope"
+  }
+}
