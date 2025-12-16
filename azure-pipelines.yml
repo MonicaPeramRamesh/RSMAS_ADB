@@ -2,44 +2,29 @@ trigger:
 - main
 
 pool:
-  vmImage: ubuntu-latest
+  vmImage: 'ubuntu-latest'
 
-variables:
-- group: dev-dlt-vars
+stages:
+- stage: Build
+  displayName: "Build Stage"
+  jobs:
+  - job: BuildJob
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    # Use Python
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.x'
 
-steps:
-- task: UsePythonVersion@0
-  inputs:
-    versionSpec: '3.x'
+    # Install dependencies & lint/test
+    - script: |
+        pip install -r requirements.txt
+        echo "✅ Dependencies installed"
+        # Optional: run tests here
+      displayName: "Install dependencies & test"
 
-- script: |
-    pip install databricks-cli jq
-    databricks configure --token <<< "$(DATABRICKS_HOST)\n$(DATABRICKS_TOKEN)"
-  displayName: Configure Databricks CLI
-
-- script: |
-    for file in dlt/**/pipelines/*.json; do
-      echo "🚀 Deploying $file"
-
-      python scripts/update_pipeline_json.py \
-        --file "$file" \
-        --catalog "$(DLT_CATALOG)" \
-        --schema "$(DLT_SCHEMA)" \
-        --secret_scope "$(DLT_SECRET_SCOPE)"
-
-      PIPELINE_NAME=$(jq -r '.name' "$file")
-
-      PIPELINE_ID=$(databricks pipelines list \
-        | jq -r ".[] | select(.name==\"$PIPELINE_NAME\") | .pipeline_id")
-
-      if [ -z "$PIPELINE_ID" ]; then
-        databricks pipelines create --json-file "$file"
-        echo "✅ Created: $PIPELINE_NAME"
-      else
-        databricks pipelines update \
-          --pipeline-id "$PIPELINE_ID" \
-          --json-file "$file"
-        echo "🔁 Updated: $PIPELINE_NAME"
-      fi
-    done
-  displayName: Deploy ALL DLT pipelines
+    # Publish artifact for release pipeline
+    - publish: .
+      artifact: DLT_Artifact
+      displayName: "Publish Artifact"
