@@ -1,130 +1,363 @@
+# =============================================================================
+# Azure DevOps Pipeline for Delta Live Tables Deployment
+# Supports: Multiple DLTs, Notebooks, Windows Self-Hosted Agent (PowerShell)
+# =============================================================================
+
 trigger:
-- main
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - '*/pipelines/*.json'
+      - '*/transformations/**'
+      - '**/*.ipynb'
 
 pool:
-  name: Default
-  demands:
-    - agent.name -equals RSMAS-Agent
+  name: 'Default'  # Your self-hosted agent pool name
 
 variables:
-- group: test-dlt-vars  # Databricks credentials & target catalog/schema
+  - group: test-dlt-vars  # Variable group containing Databricks credentials
+  - name: PYTHON_VERSION
+    value: '3.10'
+  - name: REPOS_BASE_PATH
+    value: '/Repos/RSMAS_ADB/dlt'
 
 stages:
+  - stage: Validate
+    displayName: 'Validate Configuration'
+    jobs:
+      - job: ValidateJob
+        displayName: 'Validate Pipeline Configurations'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(PYTHON_VERSION)'
+            displayName: 'Set Python Version'
 
-# =====================================================
-# Stage 1️⃣ Build
-# =====================================================
-- stage: Build
-  displayName: "Build DLT Artifact"
-  jobs:
-  - job: BuildJob
-    displayName: "Build DLT Artifact"
-    pool:
-      name: Default
-      demands:
-        - agent.name -equals RSMAS-Agent
-    steps:
-
-    - script: |
-        python --version
-        pip --version
-      displayName: "Verify Python"
-
-    - script: |
-        echo "✅ Dependencies installed"
-      displayName: "Install dependencies"
-
-    - publish: .
-      artifact: DLT_Artifact
-      displayName: "Publish DLT Artifact"
-
-# =====================================================
-# Stage 2️⃣ Deploy
-# =====================================================
-- stage: Deploy
-  displayName: "Deploy All DLT Pipelines & Notebooks"
-  dependsOn: Build
-  jobs:
-  - job: DeployJob
-    displayName: "Deploy DLT Pipelines & Notebooks"
-    pool:
-      name: Default
-      demands:
-        - agent.name -equals RSMAS-Agent
-    steps:
-
-    # Download the artifact
-    - download: current
-      artifact: DLT_Artifact
-      displayName: "Download DLT Artifact"
-
-    # Deploy all JSON pipeline files
-    - task: PowerShell@2
-      displayName: "Deploy all DLT Pipelines"
-      inputs:
-        targetType: 'inline'
-        script: |
-          $artifactPath = "$(Pipeline.Workspace)/DLT_Artifact"
-          $pipelineFolder = Join-Path $artifactPath "pipelines"
-
-          if (-Not (Test-Path $pipelineFolder)) {
-              Write-Error "Pipeline folder '$pipelineFolder' not found!"
-              exit 1
-          }
-
-          $jsonFiles = Get-ChildItem -Path $pipelineFolder -Filter *.json
-          foreach ($file in $jsonFiles) {
-              Write-Host "Updating pipeline JSON: $($file.FullName)"
-              python "$artifactPath/scripts/update_pipeline_json.py" --file $file.FullName --catalog $(DLT_CATALOG) --schema $(DLT_SCHEMA) --secret_scope $(DLT_SECRET_SCOPE)
-
-              $pipelineJson = Get-Content $file.FullName -Raw
-              $pipelineName = (ConvertFrom-Json $pipelineJson).name
-
-              # Try to create the pipeline
-              $response = curl -s -o $null -w "%{http_code}" -X POST `
-                  -H "Authorization: Bearer $(DATABRICKS_TOKEN)" `
-                  -H "Content-Type: application/json" `
-                  -d $pipelineJson `
-                  https://$(DATABRICKS_HOST)/api/2.0/pipelines
-
-              if ($response -eq "409") {
-                  Write-Host "Pipeline '$pipelineName' exists, updating..."
-                  $pipelinesList = curl -s -H "Authorization: Bearer $(DATABRICKS_TOKEN)" https://$(DATABRICKS_HOST)/api/2.0/pipelines | ConvertFrom-Json
-                  $pipelineId = ($pipelinesList.pipelines | Where-Object { $_.name -eq $pipelineName }).pipeline_id
-                  
-                  curl -s -X PATCH `
-                      -H "Authorization: Bearer $(DATABRICKS_TOKEN)" `
-                      -H "Content-Type: application/json" `
-                      -d $pipelineJson `
-                      https://$(DATABRICKS_HOST)/api/2.0/pipelines/$pipelineId
+          - pwsh: |
+              Write-Host "=== Validating Pipeline Configurations ===" -ForegroundColor Cyan
+              
+              $pipelineFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Filter "*.json" -Recurse | Where-Object { $_.Directory.Name -eq "pipelines" }
+              
+              if ($pipelineFiles.Count -eq 0) {
+                Write-Host "##vso[task.logissue type=error]No pipeline JSON files found in */pipelines/ directories"
+                exit 1
               }
-          }
+              
+              Write-Host "Found $($pipelineFiles.Count) pipeline configuration(s):" -ForegroundColor Green
+              
+              foreach ($file in $pipelineFiles) {
+                Write-Host "  - $($file.FullName)" -ForegroundColor Yellow
+                
+                # Validate JSON syntax
+                try {
+                  $json = Get-Content $file.FullName -Raw | ConvertFrom-Json
+                  Write-Host "    ✓ Valid JSON" -ForegroundColor Green
+                  
+                  # Validate required fields
+                  $requiredFields = @('name', 'libraries', 'catalog', 'schema', 'configuration')
+                  foreach ($field in $requiredFields) {
+                    if (-not $json.PSObject.Properties.Name.Contains($field)) {
+                      Write-Host "##vso[task.logissue type=error]Missing required field: $field in $($file.Name)"
+                      exit 1
+                    }
+                  }
+                  Write-Host "    ✓ All required fields present" -ForegroundColor Green
+                } catch {
+                  Write-Host "##vso[task.logissue type=error]Invalid JSON in $($file.Name): $_"
+                  exit 1
+                }
+              }
+              
+              Write-Host "`n✅ All pipeline configurations validated successfully" -ForegroundColor Green
+            displayName: 'Validate Pipeline JSON Files'
 
-    # Deploy all notebooks
-    - task: PowerShell@2
-      displayName: "Deploy all Notebooks"
-      inputs:
-        targetType: 'inline'
-        script: |
-          $artifactPath = "$(Pipeline.Workspace)/DLT_Artifact"
-          $notebooks = Get-ChildItem -Path $artifactPath -Recurse -Filter *.ipynb
-          foreach ($nb in $notebooks) {
-              $relPath = $nb.FullName.Substring($artifactPath.Length + 1) -replace '\\','/'
-              $targetPath = "/Repos/RSMAS_ADB/dlt/$relPath"
-              Write-Host "Deploying $($nb.FullName) -> $targetPath"
+          - pwsh: |
+              Write-Host "=== Validating Environment Variables ===" -ForegroundColor Cyan
               
-              $content = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($nb.FullName))
+              $requiredVars = @{
+                'DATABRICKS_HOST' = '$(DATABRICKS_HOST)'
+                'DATABRICKS_TOKEN' = '$(DATABRICKS_TOKEN)'
+                'DLT_CATALOG' = '$(DLT_CATALOG)'
+                'DLT_SCHEMA' = '$(DLT_SCHEMA)'
+                'DLT_SECRET_SCOPE' = '$(DLT_SECRET_SCOPE)'
+              }
               
-              curl -s -X POST `
-                -H "Authorization: Bearer $(DATABRICKS_TOKEN)" `
-                -H "Content-Type: application/json" `
-                -d (@"
-{
-  "path": "$targetPath",
-  "language": "PYTHON",
-  "overwrite": true,
-  "content": "$content"
-}
-"@) `
-                https://$(DATABRICKS_HOST)/api/2.0/workspace/import
-          }
+              $allValid = $true
+              foreach ($var in $requiredVars.GetEnumerator()) {
+                if ([string]::IsNullOrWhiteSpace($var.Value)) {
+                  Write-Host "##vso[task.logissue type=error]Missing required variable: $($var.Key)"
+                  $allValid = $false
+                } else {
+                  Write-Host "✓ $($var.Key) is set" -ForegroundColor Green
+                }
+              }
+              
+              if (-not $allValid) {
+                exit 1
+              }
+              
+              Write-Host "`n✅ All environment variables validated" -ForegroundColor Green
+            displayName: 'Validate Environment Variables'
+
+  - stage: Build
+    displayName: 'Build and Update Configurations'
+    dependsOn: Validate
+    jobs:
+      - job: BuildJob
+        displayName: 'Update Pipeline Configurations'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(PYTHON_VERSION)'
+            displayName: 'Set Python Version'
+
+          - pwsh: |
+              Write-Host "=== Discovering DLT Pipelines ===" -ForegroundColor Cyan
+              
+              $pipelineFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Filter "*.json" -Recurse | Where-Object { $_.Directory.Name -eq "pipelines" }
+              
+              $pipelineList = @()
+              foreach ($file in $pipelineFiles) {
+                $pipelineList += $file.FullName
+              }
+              
+              $pipelineListJson = $pipelineList | ConvertTo-Json -Compress
+              Write-Host "##vso[task.setvariable variable=PIPELINE_FILES;isOutput=true]$pipelineListJson"
+              
+              Write-Host "Discovered pipelines:" -ForegroundColor Green
+              $pipelineList | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
+            displayName: 'Discover DLT Pipelines'
+            name: discoverPipelines
+
+          - pwsh: |
+              Write-Host "=== Updating Pipeline Configurations ===" -ForegroundColor Cyan
+              
+              $pipelineFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Filter "*.json" -Recurse | Where-Object { $_.Directory.Name -eq "pipelines" }
+              
+              foreach ($file in $pipelineFiles) {
+                Write-Host "`nProcessing: $($file.Name)" -ForegroundColor Yellow
+                
+                python "$(Build.SourcesDirectory)/scripts/update_pipeline_json.py" `
+                  --file "$($file.FullName)" `
+                  --catalog "$(DLT_CATALOG)" `
+                  --schema "$(DLT_SCHEMA)" `
+                  --secret_scope "$(DLT_SECRET_SCOPE)"
+                
+                if ($LASTEXITCODE -ne 0) {
+                  Write-Host "##vso[task.logissue type=error]Failed to update $($file.Name)"
+                  exit 1
+                }
+              }
+              
+              Write-Host "`n✅ All pipeline configurations updated" -ForegroundColor Green
+            displayName: 'Update Pipeline Configurations for Test Environment'
+
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: '$(Build.SourcesDirectory)'
+              ArtifactName: 'dlt-pipelines'
+              publishLocation: 'Container'
+            displayName: 'Publish Pipeline Artifacts'
+
+  - stage: Deploy
+    displayName: 'Deploy to Test Environment'
+    dependsOn: Build
+    jobs:
+      - deployment: DeployDLT
+        displayName: 'Deploy DLT Pipelines'
+        environment: 'test'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: '$(PYTHON_VERSION)'
+                  displayName: 'Set Python Version'
+
+                - pwsh: |
+                    Write-Host "=== Installing Databricks CLI ===" -ForegroundColor Cyan
+                    pip install databricks-cli --upgrade
+                    
+                    if ($LASTEXITCODE -ne 0) {
+                      Write-Host "##vso[task.logissue type=error]Failed to install Databricks CLI"
+                      exit 1
+                    }
+                    
+                    Write-Host "✅ Databricks CLI installed" -ForegroundColor Green
+                  displayName: 'Install Databricks CLI'
+
+                - pwsh: |
+                    Write-Host "=== Configuring Databricks CLI ===" -ForegroundColor Cyan
+                    
+                    # Set environment variables for Databricks CLI
+                    $env:DATABRICKS_HOST = "$(DATABRICKS_HOST)"
+                    $env:DATABRICKS_TOKEN = "$(DATABRICKS_TOKEN)"
+                    
+                    # Test connection
+                    databricks workspace ls /
+                    
+                    if ($LASTEXITCODE -ne 0) {
+                      Write-Host "##vso[task.logissue type=error]Failed to connect to Databricks workspace"
+                      exit 1
+                    }
+                    
+                    Write-Host "✅ Databricks connection verified" -ForegroundColor Green
+                  displayName: 'Configure and Test Databricks Connection'
+                  env:
+                    DATABRICKS_HOST: $(DATABRICKS_HOST)
+                    DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+
+                - pwsh: |
+                    Write-Host "=== Deploying Notebooks and Scripts ===" -ForegroundColor Cyan
+                    
+                    $env:DATABRICKS_HOST = "$(DATABRICKS_HOST)"
+                    $env:DATABRICKS_TOKEN = "$(DATABRICKS_TOKEN)"
+                    
+                    # Find all directories containing pipelines
+                    $pipelineDirs = Get-ChildItem -Path "$(Pipeline.Workspace)/dlt-pipelines" -Directory -Recurse | Where-Object { 
+                      (Test-Path (Join-Path $_.FullName "pipelines")) 
+                    }
+                    
+                    foreach ($dir in $pipelineDirs) {
+                      $projectName = $dir.Name
+                      $reposPath = "$(REPOS_BASE_PATH)/$projectName"
+                      
+                      Write-Host "`nDeploying project: $projectName" -ForegroundColor Yellow
+                      Write-Host "Target path: $reposPath" -ForegroundColor Cyan
+                      
+                      # Create base directory in Databricks workspace
+                      databricks workspace mkdirs "$reposPath"
+                      
+                      # Deploy transformations (Python files)
+                      $transformationsPath = Join-Path $dir.FullName "transformations"
+                      if (Test-Path $transformationsPath) {
+                        Write-Host "  Deploying transformations..." -ForegroundColor Gray
+                        databricks workspace mkdirs "$reposPath/transformations"
+                        
+                        Get-ChildItem -Path $transformationsPath -Filter "*.py" -Recurse | ForEach-Object {
+                          $relativePath = $_.FullName.Substring($transformationsPath.Length).TrimStart('\', '/')
+                          $targetPath = "$reposPath/transformations/$relativePath" -replace '\\', '/'
+                          
+                          Write-Host "    Uploading: $($_.Name) -> $targetPath" -ForegroundColor Gray
+                          databricks workspace import "$($_.FullName)" "$targetPath" --language PYTHON --overwrite
+                        }
+                      }
+                      
+                      # Deploy notebooks
+                      Get-ChildItem -Path $dir.FullName -Filter "*.ipynb" | ForEach-Object {
+                        $targetPath = "$reposPath/$($_.BaseName)"
+                        Write-Host "  Uploading notebook: $($_.Name) -> $targetPath" -ForegroundColor Gray
+                        databricks workspace import "$($_.FullName)" "$targetPath" --language PYTHON --format JUPYTER --overwrite
+                      }
+                      
+                      # Deploy utilities if they exist
+                      $utilitiesPath = Join-Path $dir.FullName "utilities"
+                      if (Test-Path $utilitiesPath) {
+                        Write-Host "  Deploying utilities..." -ForegroundColor Gray
+                        databricks workspace mkdirs "$reposPath/utilities"
+                        
+                        Get-ChildItem -Path $utilitiesPath -Recurse | ForEach-Object {
+                          if ($_.Extension -in @('.py', '.ipynb')) {
+                            $relativePath = $_.FullName.Substring($utilitiesPath.Length).TrimStart('\', '/')
+                            $targetPath = "$reposPath/utilities/$relativePath" -replace '\\', '/'
+                            
+                            if ($_.Extension -eq '.py') {
+                              databricks workspace import "$($_.FullName)" "$targetPath" --language PYTHON --overwrite
+                            } else {
+                              databricks workspace import "$($_.FullName)" "$targetPath" --language PYTHON --format JUPYTER --overwrite
+                            }
+                          }
+                        }
+                      }
+                    }
+                    
+                    Write-Host "`n✅ All notebooks and scripts deployed" -ForegroundColor Green
+                  displayName: 'Deploy Notebooks and Scripts'
+                  env:
+                    DATABRICKS_HOST: $(DATABRICKS_HOST)
+                    DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+
+                - pwsh: |
+                    Write-Host "=== Deploying DLT Pipelines ===" -ForegroundColor Cyan
+                    
+                    $env:DATABRICKS_HOST = "$(DATABRICKS_HOST)"
+                    $env:DATABRICKS_TOKEN = "$(DATABRICKS_TOKEN)"
+                    
+                    # Find all pipeline JSON files
+                    $pipelineFiles = Get-ChildItem -Path "$(Pipeline.Workspace)/dlt-pipelines" -Filter "*.json" -Recurse | Where-Object { $_.Directory.Name -eq "pipelines" }
+                    
+                    foreach ($file in $pipelineFiles) {
+                      Write-Host "`nProcessing pipeline: $($file.Name)" -ForegroundColor Yellow
+                      
+                      # Read pipeline configuration
+                      $pipelineConfig = Get-Content $file.FullName -Raw | ConvertFrom-Json
+                      $pipelineName = $pipelineConfig.name
+                      
+                      Write-Host "Pipeline Name: $pipelineName" -ForegroundColor Cyan
+                      Write-Host "Catalog: $($pipelineConfig.catalog)" -ForegroundColor Cyan
+                      Write-Host "Schema: $($pipelineConfig.schema)" -ForegroundColor Cyan
+                      
+                      # Check if pipeline exists
+                      Write-Host "Checking if pipeline exists..." -ForegroundColor Gray
+                      $existingPipeline = databricks pipelines get --pipeline-name "$pipelineName" 2>$null
+                      
+                      if ($LASTEXITCODE -eq 0) {
+                        Write-Host "  Pipeline exists - updating..." -ForegroundColor Yellow
+                        
+                        # Extract pipeline ID from existing pipeline
+                        $pipelineId = ($existingPipeline | ConvertFrom-Json).pipeline_id
+                        
+                        # Update pipeline
+                        $updatePayload = $pipelineConfig | ConvertTo-Json -Depth 10 -Compress
+                        $updatePayload | databricks pipelines update --pipeline-id "$pipelineId" --spec-json-input
+                        
+                        if ($LASTEXITCODE -eq 0) {
+                          Write-Host "  ✓ Pipeline updated successfully" -ForegroundColor Green
+                        } else {
+                          Write-Host "##vso[task.logissue type=error]Failed to update pipeline: $pipelineName"
+                          exit 1
+                        }
+                      } else {
+                        Write-Host "  Pipeline doesn't exist - creating..." -ForegroundColor Yellow
+                        
+                        # Create new pipeline
+                        $createPayload = $pipelineConfig | ConvertTo-Json -Depth 10 -Compress
+                        $result = $createPayload | databricks pipelines create --spec-json-input
+                        
+                        if ($LASTEXITCODE -eq 0) {
+                          $pipelineId = ($result | ConvertFrom-Json).pipeline_id
+                          Write-Host "  ✓ Pipeline created successfully (ID: $pipelineId)" -ForegroundColor Green
+                        } else {
+                          Write-Host "##vso[task.logissue type=error]Failed to create pipeline: $pipelineName"
+                          exit 1
+                        }
+                      }
+                    }
+                    
+                    Write-Host "`n✅ All DLT pipelines deployed successfully" -ForegroundColor Green
+                  displayName: 'Create/Update DLT Pipelines'
+                  env:
+                    DATABRICKS_HOST: $(DATABRICKS_HOST)
+                    DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+
+                - pwsh: |
+                    Write-Host "=== Deployment Summary ===" -ForegroundColor Cyan
+                    
+                    $env:DATABRICKS_HOST = "$(DATABRICKS_HOST)"
+                    $env:DATABRICKS_TOKEN = "$(DATABRICKS_TOKEN)"
+                    
+                    Write-Host "`nDeployed DLT Pipelines:" -ForegroundColor Green
+                    databricks pipelines list | ConvertFrom-Json | ForEach-Object {
+                      Write-Host "  - $($_.name) (ID: $($_.pipeline_id))" -ForegroundColor Yellow
+                    }
+                    
+                    Write-Host "`n✅ Deployment completed successfully!" -ForegroundColor Green
+                    Write-Host "View your pipelines at: $(DATABRICKS_HOST)/pipelines" -ForegroundColor Cyan
+                  displayName: 'Deployment Summary'
+                  env:
+                    DATABRICKS_HOST: $(DATABRICKS_HOST)
+                    DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
