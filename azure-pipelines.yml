@@ -53,21 +53,29 @@ stages:
         - agent.name -equals RSMAS-Agent
     steps:
 
+    # Download the artifact
     - download: current
       artifact: DLT_Artifact
       displayName: "Download DLT Artifact"
 
-    # 1️⃣ Deploy all DLT pipeline JSONs
+    # Deploy all JSON pipeline files
     - task: PowerShell@2
       displayName: "Deploy all DLT Pipelines"
       inputs:
         targetType: 'inline'
         script: |
-          Write-Host "Deploying DLT pipelines..."
-          $jsonFiles = Get-ChildItem -Path ./pipelines -Filter *.json
+          $artifactPath = "$(Pipeline.Workspace)/DLT_Artifact"
+          $pipelineFolder = Join-Path $artifactPath "pipelines"
+
+          if (-Not (Test-Path $pipelineFolder)) {
+              Write-Error "Pipeline folder '$pipelineFolder' not found!"
+              exit 1
+          }
+
+          $jsonFiles = Get-ChildItem -Path $pipelineFolder -Filter *.json
           foreach ($file in $jsonFiles) {
               Write-Host "Updating pipeline JSON: $($file.FullName)"
-              python ./scripts/update_pipeline_json.py --file $file.FullName --catalog $(DLT_CATALOG) --schema $(DLT_SCHEMA) --secret_scope $(DLT_SECRET_SCOPE)
+              python "$artifactPath/scripts/update_pipeline_json.py" --file $file.FullName --catalog $(DLT_CATALOG) --schema $(DLT_SCHEMA) --secret_scope $(DLT_SECRET_SCOPE)
 
               $pipelineJson = Get-Content $file.FullName -Raw
               $pipelineName = (ConvertFrom-Json $pipelineJson).name
@@ -76,7 +84,7 @@ stages:
               $response = curl -s -o $null -w "%{http_code}" -X POST `
                   -H "Authorization: Bearer $(DATABRICKS_TOKEN)" `
                   -H "Content-Type: application/json" `
-                  -d "$pipelineJson" `
+                  -d $pipelineJson `
                   https://$(DATABRICKS_HOST)/api/2.0/pipelines
 
               if ($response -eq "409") {
@@ -87,37 +95,36 @@ stages:
                   curl -s -X PATCH `
                       -H "Authorization: Bearer $(DATABRICKS_TOKEN)" `
                       -H "Content-Type: application/json" `
-                      -d "$pipelineJson" `
+                      -d $pipelineJson `
                       https://$(DATABRICKS_HOST)/api/2.0/pipelines/$pipelineId
               }
           }
 
-    # 2️⃣ Deploy all notebooks
+    # Deploy all notebooks
     - task: PowerShell@2
       displayName: "Deploy all Notebooks"
       inputs:
         targetType: 'inline'
         script: |
-          Write-Host "Deploying notebooks..."
-          $notebooks = Get-ChildItem -Path ./ -Recurse -Filter *.ipynb
+          $artifactPath = "$(Pipeline.Workspace)/DLT_Artifact"
+          $notebooks = Get-ChildItem -Path $artifactPath -Recurse -Filter *.ipynb
           foreach ($nb in $notebooks) {
-              $relPath = $nb.FullName.Substring((Get-Location).Path.Length + 1) -replace '\\','/'
+              $relPath = $nb.FullName.Substring($artifactPath.Length + 1) -replace '\\','/'
               $targetPath = "/Repos/RSMAS_ADB/dlt/$relPath"
               Write-Host "Deploying $($nb.FullName) -> $targetPath"
               
               $content = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($nb.FullName))
-
-              # Create JSON payload safely
-              $payload = @{
-                  path = $targetPath
-                  language = "PYTHON"
-                  overwrite = $true
-                  content = $content
-              } | ConvertTo-Json -Compress
-
+              
               curl -s -X POST `
                 -H "Authorization: Bearer $(DATABRICKS_TOKEN)" `
                 -H "Content-Type: application/json" `
-                -d "$payload" `
+                -d (@"
+{
+  "path": "$targetPath",
+  "language": "PYTHON",
+  "overwrite": true,
+  "content": "$content"
+}
+"@) `
                 https://$(DATABRICKS_HOST)/api/2.0/workspace/import
           }
