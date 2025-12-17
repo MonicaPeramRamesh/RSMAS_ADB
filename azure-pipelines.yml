@@ -9,11 +9,10 @@ pool:
 variables:
 - group: test-dlt-vars  # Databricks credentials & target catalog/schema
 
-stages:
-
 # =====================================================
 # Stage 1️⃣ Build
 # =====================================================
+stages:
 - stage: Build
   displayName: "Build DLT Artifact"
   jobs:
@@ -58,66 +57,65 @@ stages:
       displayName: "Download DLT Artifact"
 
     # 1️⃣ Deploy all DLT pipeline JSONs
-    - task: Bash@3
+    - task: PowerShell@2
       displayName: "Deploy all DLT Pipelines"
       inputs:
         targetType: 'inline'
         script: |
-          echo "Deploying DLT pipelines..."
-          for PIPELINE_FILE in ./pipelines/*.json; do
-            echo "Updating pipeline JSON: $PIPELINE_FILE"
-            python ./scripts/update_pipeline_json.py \
-              --file "$PIPELINE_FILE" \
-              --catalog $(DLT_CATALOG) \
-              --schema $(DLT_SCHEMA) \
-              --secret_scope $(DLT_SECRET_SCOPE)
+          Write-Host "Deploying DLT pipelines..."
+          $jsonFiles = Get-ChildItem -Path ./pipelines -Filter *.json
+          foreach ($file in $jsonFiles) {
+              Write-Host "Updating pipeline JSON: $($file.FullName)"
+              python ./scripts/update_pipeline_json.py --file $file.FullName --catalog $(DLT_CATALOG) --schema $(DLT_SCHEMA) --secret_scope $(DLT_SECRET_SCOPE)
 
-            PIPELINE_JSON=$(jq -c . "$PIPELINE_FILE")
-            PIPELINE_NAME=$(jq -r .name "$PIPELINE_FILE")
+              $pipelineJson = Get-Content $file.FullName -Raw
+              $pipelineName = (ConvertFrom-Json $pipelineJson).name
 
-            # Try to create the pipeline
-            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
-              -H "Authorization: Bearer $(DATABRICKS_TOKEN)" \
-              -H "Content-Type: application/json" \
-              -d "$PIPELINE_JSON" \
-              https://$(DATABRICKS_HOST)/api/2.0/pipelines)
+              # Try to create the pipeline
+              $response = curl -s -o $null -w "%{http_code}" -X POST `
+                  -H "Authorization: Bearer $(DATABRICKS_TOKEN)" `
+                  -H "Content-Type: application/json" `
+                  -d $pipelineJson `
+                  https://$(DATABRICKS_HOST)/api/2.0/pipelines
 
-            if [ "$RESPONSE" == "409" ]; then
-              echo "Pipeline '$PIPELINE_NAME' exists, updating..."
-              PIPELINE_ID=$(curl -s -H "Authorization: Bearer $(DATABRICKS_TOKEN)" \
-                https://$(DATABRICKS_HOST)/api/2.0/pipelines | \
-                jq -r --arg NAME "$PIPELINE_NAME" '.pipelines[] | select(.name==$NAME) | .pipeline_id')
-
-              curl -s -X PATCH \
-                -H "Authorization: Bearer $(DATABRICKS_TOKEN)" \
-                -H "Content-Type: application/json" \
-                -d "$PIPELINE_JSON" \
-                https://$(DATABRICKS_HOST)/api/2.0/pipelines/$PIPELINE_ID
-            fi
-          done
+              if ($response -eq "409") {
+                  Write-Host "Pipeline '$pipelineName' exists, updating..."
+                  $pipelinesList = curl -s -H "Authorization: Bearer $(DATABRICKS_TOKEN)" https://$(DATABRICKS_HOST)/api/2.0/pipelines | ConvertFrom-Json
+                  $pipelineId = ($pipelinesList.pipelines | Where-Object { $_.name -eq $pipelineName }).pipeline_id
+                  
+                  curl -s -X PATCH `
+                      -H "Authorization: Bearer $(DATABRICKS_TOKEN)" `
+                      -H "Content-Type: application/json" `
+                      -d $pipelineJson `
+                      https://$(DATABRICKS_HOST)/api/2.0/pipelines/$pipelineId
+              }
+          }
 
     # 2️⃣ Deploy all notebooks
-    - task: Bash@3
+    - task: PowerShell@2
       displayName: "Deploy all Notebooks"
       inputs:
         targetType: 'inline'
         script: |
-          echo "Deploying notebooks..."
-          find ./ -name "*.ipynb" | while read NOTEBOOK; do
-            REL_PATH=${NOTEBOOK#./}
-            TARGET_PATH="/Repos/RSMAS_ADB/dlt/$REL_PATH"
-            echo "Deploying $NOTEBOOK -> $TARGET_PATH"
-
-            CONTENT=$(base64 -w 0 "$NOTEBOOK" || base64 "$NOTEBOOK" | tr -d '\n')
-
-            curl -s -X POST \
-              -H "Authorization: Bearer $(DATABRICKS_TOKEN)" \
-              -H "Content-Type: application/json" \
-              -d '{
-                "path": "'"$TARGET_PATH"'",
-                "language": "PYTHON",
-                "overwrite": true,
-                "content": "'"$CONTENT"'"
-              }' \
-              https://$(DATABRICKS_HOST)/api/2.0/workspace/import
-          done
+          Write-Host "Deploying notebooks..."
+          $notebooks = Get-ChildItem -Path ./ -Recurse -Filter *.ipynb
+          foreach ($nb in $notebooks) {
+              $relPath = $nb.FullName.Substring((Get-Location).Path.Length + 1) -replace '\\','/'
+              $targetPath = "/Repos/RSMAS_ADB/dlt/$relPath"
+              Write-Host "Deploying $($nb.FullName) -> $targetPath"
+              
+              $content = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($nb.FullName))
+              
+              curl -s -X POST `
+                -H "Authorization: Bearer $(DATABRICKS_TOKEN)" `
+                -H "Content-Type: application/json" `
+                -d (@"
+{
+  "path": "$targetPath",
+  "language": "PYTHON",
+  "overwrite": true,
+  "content": "$content"
+}
+"@) `
+                https://$(DATABRICKS_HOST)/api/2.0/workspace/import
+          }
