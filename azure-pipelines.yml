@@ -2,11 +2,20 @@ trigger:
 - main
 
 pool:
-  name: Default   # Self-hosted agent pool
+  name: Default
+  demands:
+    - agent.name -equals RSMAS-Agent
+
+variables:
+- group: DLT_Variables  # Databricks credentials & target catalog/schema
 
 stages:
+
+# =====================================================
+# Stage 1️⃣ Build
+# =====================================================
 - stage: Build
-  displayName: "Build Stage"
+  displayName: "Build DLT Artifact"
   jobs:
   - job: BuildJob
     displayName: "Build DLT Artifact"
@@ -14,20 +23,82 @@ stages:
       name: Default
       demands:
         - agent.name -equals RSMAS-Agent
-
     steps:
-    # 1️⃣ Verify Python (uses agent-installed Python)
+
     - script: |
         python --version
         pip --version
-      displayName: "Verify Python on Agent"
+      displayName: "Verify Python"
 
-    # 2️⃣ Install dependencies
     - script: |
         echo "✅ Dependencies installed"
       displayName: "Install dependencies"
 
-    # 3️⃣ Publish artifact
     - publish: .
       artifact: DLT_Artifact
       displayName: "Publish DLT Artifact"
+
+# =====================================================
+# Stage 2️⃣ Deploy
+# =====================================================
+- stage: Deploy
+  displayName: "Deploy All DLT Pipelines & Notebooks"
+  dependsOn: Build
+  jobs:
+  - job: DeployJob
+    displayName: "Deploy DLT Pipelines & Notebooks"
+    pool:
+      name: Default
+      demands:
+        - agent.name -equals RSMAS-Agent
+    steps:
+
+    - download: current
+      artifact: DLT_Artifact
+      displayName: "Download DLT Artifact"
+
+    # 1️⃣ Loop through all JSON pipeline files
+    - script: |
+        echo "Deploying DLT pipelines..."
+        for PIPELINE_FILE in ./pipelines/*.json; do
+          echo "Updating pipeline JSON: $PIPELINE_FILE"
+          python ./scripts/update_pipeline_json.py \
+            --file $PIPELINE_FILE \
+            --catalog $(DLT_CATALOG) \
+            --schema $(DLT_SCHEMA) \
+            --secret_scope $(DLT_SECRET_SCOPE)
+
+          echo "Deploying pipeline to Databricks: $PIPELINE_FILE"
+          PIPELINE_JSON=$(cat $PIPELINE_FILE)
+          curl -s -X POST \
+            -H "Authorization: Bearer $(DATABRICKS_TOKEN)" \
+            -H "Content-Type: application/json" \
+            -d "$PIPELINE_JSON" \
+            https://$(DATABRICKS_HOST)/api/2.0/pipelines
+        done
+      displayName: "Deploy all DLT Pipelines"
+
+    # 2️⃣ Loop through all notebooks in repo
+    - script: |
+        echo "Deploying notebooks..."
+        find ./ -name "*.ipynb" | while read NOTEBOOK; do
+          REL_PATH=${NOTEBOOK#./}
+          TARGET_PATH="/Repos/RSMAS_ADB/dlt/$REL_PATH"
+          echo "Deploying $NOTEBOOK -> $TARGET_PATH"
+
+          CONTENT=$(base64 -w 0 $NOTEBOOK)
+
+          curl -s -X POST \
+            -H "Authorization: Bearer $(DATABRICKS_TOKEN)" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "path": "'"$TARGET_PATH"'",
+              "language": "PYTHON",
+              "overwrite": true,
+              "content": "'"$CONTENT"'"
+            }' \
+            https://$(DATABRICKS_HOST)/api/2.0/workspace/import
+        done
+      displayName: "Deploy all Notebooks"
+
+so this will give resukt as i can see the dlt pipeline in my test env?
