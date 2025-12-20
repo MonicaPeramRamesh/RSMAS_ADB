@@ -16,46 +16,44 @@ stages:
     - checkout: self
       clean: true
 
-    # 1. Update JSON (your script logic)
+    # 1. Update JSON
     - task: PowerShell@2
       displayName: '🔧 Update JSON'
       inputs:
         targetType: 'inline'
         script: |
           $jsonPath = "$(Build.SourcesDirectory)/Product Master/pipelines/product_master.json"
-          $catalog = "$(DLT_CATALOG)"  # test_rsmas_catalog
+          $catalog = "$(DLT_CATALOG)"
           $schema = "$(DLT_SCHEMA)"
           $secretScope = "$(DLT_SECRET_SCOPE)"
           
           $json = Get-Content $jsonPath -Raw | ConvertFrom-Json
-          
-          # Update EXACTLY like your Python script
           $json.catalog = $catalog
           $json.schema = $schema
           $json.configuration."rsmas.catalog" = $catalog
           $json.configuration."rsmas.schema" = $schema
           $json.configuration."rsmas.secret.scope" = $secretScope
           
-          $json | ConvertTo-Json -Depth 10 | Set-Content $jsonPath -Encoding UTF8
-          Write-Host "✅ Updated to $catalog.$schema"
+          $json | ConvertTo-Json -Depth 10 | Set-Content $jsonPath
+          Write-Host "✅ Updated: $catalog.$schema"
 
-    # 2. FIXED API URL - CORRECT ENDPOINT
+    # 2. Create Pipeline (✅ NO $host variable!)
     - task: PowerShell@2
       displayName: '🚀 Create Pipeline'
       inputs:
         targetType: 'inline'
         script: |
-          $host = "$(DATABRICKS_HOST)"
-          $token = "$(DATABRICKS_TOKEN)"
+          $dbHost = "$(DATABRICKS_HOST)"
+          $dbToken = "$(DATABRICKS_TOKEN)"
           $jsonPath = "$(Build.SourcesDirectory)/Product Master/pipelines/product_master.json"
           
-          # ✅ CORRECT: /api/2.1/pipelines/ (NO workspace/)
-          $apiUrl = "$host/api/2.1/pipelines"
-          
           $headers = @{
-            'Authorization' = "Bearer $token"
+            'Authorization' = "Bearer $dbToken"
             'Content-Type' = 'application/json'
           }
+          
+          # Direct URL - NO variables!
+          $apiUrl = "$dbHost/api/2.1/pipelines"
           
           # Delete existing
           try {
@@ -64,49 +62,47 @@ stages:
             $existing = $pipelines | Where-Object { $_.name -eq $pipelineName }
             if ($existing) {
               Invoke-RestMethod -Uri "$apiUrl/$($existing.id)" -Method Delete -Headers $headers
-              Write-Host "🗑️ Deleted existing"
+              Write-Host "🗑️ Deleted: $($existing.id)"
               Start-Sleep 2
             }
           } catch { Write-Host "ℹ️ No existing pipeline" }
           
-          # Create pipeline
+          # Create
           $body = Get-Content $jsonPath -Raw
           $response = Invoke-RestMethod -Uri $apiUrl -Method Post -Headers $headers -Body $body
           
           Write-Host "✅ Pipeline ID: $($response.id)"
           Write-Host "##vso[task.setvariable variable=PipelineId]$($response.id)"
 
-    # 3. Upload files to WORKSPACE API
+    # 3. Upload Files
     - task: PowerShell@2
       displayName: '📁 Upload Files'
       inputs:
         targetType: 'inline'
         script: |
-          $host = "$(DATABRICKS_HOST)"
-          $token = "$(DATABRICKS_TOKEN)"
-          $wsUrl = "$host/workspace/api/2.0/workspace/import"  # ✅ Workspace API
-          $headers = @{'Authorization' = "Bearer $token"}
+          $dbHost = "$(DATABRICKS_HOST)"
+          $dbToken = "$(DATABRICKS_TOKEN)"
+          $wsUrl = "$dbHost/workspace/api/2.0/workspace/import"
+          $headers = @{'Authorization' = "Bearer $dbToken"}
           
-          $folders = @('transformations')
-          foreach($folder in $folders) {
-            $path = "$(Build.SourcesDirectory)/Product Master/$folder/*.py"
-            Get-ChildItem $path -ErrorAction SilentlyContinue | ForEach-Object {
-              $relPath = "$folder/$($_.Name)"
-              $dbPath = "/Repos/RSMAS_ADB/dlt/product_master/$relPath"
-              
-              $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content $_.FullName -Raw)))
-              $body = @{content=$content; path=$dbPath; overwrite=$true} | ConvertTo-Json
-              
-              Invoke-RestMethod -Uri $wsUrl -Method Post -Headers $headers -Body $body -ContentType "application/json"
-              Write-Host "✅ $relPath"
-            }
+          $sourceDir = "$(Build.SourcesDirectory)/Product Master/transformations"
+          Get-ChildItem $sourceDir -Filter "*.py" | ForEach-Object {
+            $relPath = "transformations/$($_.Name)"
+            $dbPath = "/Repos/RSMAS_ADB/dlt/product_master/$relPath"
+            $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content $_.FullName -Raw)))
+            $body = @{content=$content; path=$dbPath; overwrite=$true} | ConvertTo-Json
+            
+            Invoke-RestMethod -Uri $wsUrl -Method Post -Headers $headers -Body $body -ContentType "application/json"
+            Write-Host "✅ $relPath"
           }
 
     # 4. Success
     - task: PowerShell@2
-      displayName: '🎉 DONE'
+      displayName: '🎉 SUCCESS'
       inputs:
         targetType: 'inline'
         script: |
-          Write-Host "🚀 Pipeline deployed!"
-          Write-Host "$(DATABRICKS_HOST)#pipeline/$(PipelineId)"
+          $dbHost = "$(DATABRICKS_HOST)"
+          $id = "$(PipelineId)"
+          Write-Host "🚀 DEPLOYED!"
+          Write-Host "$dbHost#pipeline/$id"
