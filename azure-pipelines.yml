@@ -137,7 +137,7 @@ stages:
                 # Deploy standalone notebooks
                 foreach ($nbf in $nbFolders) {
                   Write-Host "`n=== Deploying: $($nbf.Parent.Name)/$($nbf.Name) ==="
-                  $base = "/Workspace/Shared/Notebooks/$($nbf.Parent.Name)/$($nbf.Name)"
+                  $base = "/Workspace/Shared/Notebooks/$($nbf.Name)"
                   
                   # Create dir
                   Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/mkdirs" -Headers $headers -Method Post -Body (@{path=$base}|ConvertTo-Json) -ErrorAction SilentlyContinue | Out-Null
@@ -305,7 +305,7 @@ stages:
                 # Deploy standalone notebooks
                 foreach ($nbf in $nbFolders) {
                   Write-Host "`n=== Deploying: $($nbf.Parent.Name)/$($nbf.Name) ==="
-                  $base = "/Workspace/Shared/Notebooks/$($nbf.Parent.Name)/$($nbf.Name)"
+                  $base = "/Workspace/Shared/Notebooks/$($nbf.Name)"
                   
                   # Create dir
                   Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/mkdirs" -Headers $headers -Method Post -Body (@{path=$base}|ConvertTo-Json) -ErrorAction SilentlyContinue | Out-Null
