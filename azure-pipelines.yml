@@ -2,377 +2,316 @@ trigger:
   branches:
     include:
       - main
-      
 
 pool:
   name: Default
   demands:
     - agent.name -equals RSMAS-Agent
 
-variables:
-  - group: test-dlt-vars  # Change to 'dev-dlt-vars' for dev deployment
-  - name: WORKSPACE_BASE_PATH
-    value: '/Workspace/Shared/DLT_Pipelines'  # Using Workspace instead of Repos
-  - name: ROOT_FOLDER
-    value: '.'
-
 stages:
-  - stage: Deploy_All_Pipelines
-    displayName: 'Deploy All DLT Pipelines'
+  # ===========================================
+  # STAGE 1: DEPLOY TO DEV
+  # ===========================================
+  - stage: Deploy_Dev
+    displayName: 'DEV Deployment'
+    variables:
+      - group: dev-dlt-vars
     jobs:
-      - job: DeployJob
-        displayName: 'Auto-Detect and Deploy All Pipelines'
+      - job: DeployDev
+        displayName: 'Deploy to DEV'
         steps:
-          # Step 1: Install Databricks CLI
           - task: PowerShell@2
-            displayName: 'Install Databricks CLI'
+            displayName: 'Setup & Deploy'
             inputs:
               targetType: 'inline'
               script: |
-                Write-Host "=============================================="
-                Write-Host "Installing Databricks CLI..."
-                Write-Host "=============================================="
+                # Install CLI
+                pip install databricks-cli --quiet
                 
-                pip install databricks-cli --upgrade --quiet
-                
-                $version = databricks --version
-                Write-Host "✅ Databricks CLI installed: $version"
-              errorActionPreference: 'stop'
-
-          # Step 2: Configure Databricks Authentication
-          - task: PowerShell@2
-            displayName: 'Configure Databricks Authentication'
-            inputs:
-              targetType: 'inline'
-              script: |
-                Write-Host "=============================================="
-                Write-Host "Configuring Databricks Authentication..."
-                Write-Host "=============================================="
-                
+                # Configure
                 $env:DATABRICKS_HOST = "$(DATABRICKS_HOST)"
                 $env:DATABRICKS_TOKEN = "$(DATABRICKS_TOKEN)"
-                
-                $configPath = "$env:USERPROFILE\.databrickscfg"
-                $configContent = @"
+                @"
                 [DEFAULT]
                 host = $(DATABRICKS_HOST)
                 token = $(DATABRICKS_TOKEN)
-                "@
+                "@ | Out-File "$env:USERPROFILE\.databrickscfg" -Encoding ASCII -Force
                 
-                $configContent | Out-File -FilePath $configPath -Encoding ASCII -Force
+                $headers = @{Authorization="Bearer $(DATABRICKS_TOKEN)"; "Content-Type"="application/json"}
+                $src = "$(Build.SourcesDirectory)"
                 
-                Write-Host "✅ Configuration file created"
-                Write-Host "Host: $(DATABRICKS_HOST)"
+                # Find all pipelines
+                $pipes = Get-ChildItem $src -Filter "*.json" -Recurse | Where {$_.Directory.Name -eq "pipelines"}
+                Write-Host "Found $($pipes.Count) pipeline(s)"
                 
-                Write-Host "`nTesting connection..."
-                databricks workspace list / | Out-Null
-                Write-Host "✅ Connection successful!"
-              errorActionPreference: 'stop'
-
-          # Step 3: Discover All Pipelines
-          - task: PowerShell@2
-            displayName: 'Discover All DLT Pipelines'
-            inputs:
-              targetType: 'inline'
-              script: |
-                Write-Host "=============================================="
-                Write-Host "Discovering DLT Pipelines..."
-                Write-Host "=============================================="
-                
-                $sourceDir = "$(Build.SourcesDirectory)"
-                Write-Host "Scanning directory: $sourceDir"
-                
-                $pipelineFiles = Get-ChildItem -Path $sourceDir -Filter "*.json" -Recurse | 
-                                 Where-Object { $_.Directory.Name -eq "pipelines" }
-                
-                if ($pipelineFiles.Count -eq 0) {
-                  Write-Host "❌ No pipeline JSON files found!"
-                  exit 1
-                }
-                
-                Write-Host "`n✅ Found $($pipelineFiles.Count) pipeline(s):"
-                $pipelineFiles | ForEach-Object { Write-Host "  - $($_.FullName)" }
-                
-                $pipelineInfo = @()
-                foreach ($file in $pipelineFiles) {
-                  $pipelineName = $file.BaseName
-                  $pipelineFolder = $file.Directory.Parent.FullName
+                # Deploy each pipeline
+                foreach ($p in $pipes) {
+                  $name = $p.BaseName
+                  $folder = $p.Directory.Parent
+                  Write-Host "`n=== Deploying: $name ==="
                   
-                  $info = @{
-                    Name = $pipelineName
-                    JsonPath = $file.FullName
-                    FolderPath = $pipelineFolder
-                    TransformationsPath = Join-Path $pipelineFolder "transformations"
-                    UtilitiesPath = Join-Path $pipelineFolder "utilities"
+                  $base = "/Workspace/Shared/DLT_Pipelines/$($folder.Name)/$name"
+                  
+                  # Create dirs
+                  @($base, "$base/transformations", "$base/utilities", "$base/notebooks") | ForEach {
+                    Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/mkdirs" -Headers $headers -Method Post -Body (@{path=$_}|ConvertTo-Json) -ErrorAction SilentlyContinue | Out-Null
                   }
-                  $pipelineInfo += $info
+                  
+                  # Update config
+                  $cfg = Get-Content $p.FullName | ConvertFrom-Json
+                  $cfg.catalog = "$(DLT_CATALOG)"
+                  $cfg.schema = "$(DLT_SCHEMA)"
+                  if (!$cfg.configuration) { $cfg | Add-Member -NotePropertyName configuration -NotePropertyValue @{} }
+                  $cfg.configuration | Add-Member -NotePropertyName 'rsmas.catalog' -NotePropertyValue "$(DLT_CATALOG)" -Force
+                  $cfg.configuration | Add-Member -NotePropertyName 'rsmas.schema' -NotePropertyValue "$(DLT_SCHEMA)" -Force
+                  $cfg.configuration | Add-Member -NotePropertyName 'rsmas.secret.scope' -NotePropertyValue "$(DLT_SECRET_SCOPE)" -Force
+                  if ($cfg.libraries) { $cfg.libraries | ForEach { if ($_.glob) { $_.glob.include = "$base/transformations/**" }}}
+                  
+                  $tmp = "$env:TEMP\$name.json"
+                  $cfg | ConvertTo-Json -Depth 10 | Set-Content $tmp
+                  
+                  # Upload transformations
+                  $trans = Join-Path $folder.FullName "transformations"
+                  if (Test-Path $trans) {
+                    Get-ChildItem $trans -Filter *.py -Recurse | ForEach {
+                      $tgt = "$base/transformations/$($_.Name)"
+                      $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
+                      Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/import" -Headers $headers -Method Post -Body (@{path=$tgt;content=$b64;language="PYTHON";overwrite=$true;format="SOURCE"}|ConvertTo-Json) | Out-Null
+                      Write-Host "  ✅ $($_.Name)"
+                    }
+                  }
+                  
+                  # Upload utilities
+                  $util = Join-Path $folder.FullName "utilities"
+                  if (Test-Path $util) {
+                    Get-ChildItem $util -Include *.ipynb,*.py,*.sql -Recurse | ForEach {
+                      $tgt = "$base/utilities/$($_.Name)"
+                      $fmt = "SOURCE"; $lang = "PYTHON"
+                      if ($_.Extension -eq ".ipynb") { $fmt = "JUPYTER" }
+                      if ($_.Extension -eq ".sql") { $fmt = "SQL"; $lang = "SQL" }
+                      $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
+                      Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/import" -Headers $headers -Method Post -Body (@{path=$tgt;content=$b64;language=$lang;overwrite=$true;format=$fmt}|ConvertTo-Json) | Out-Null
+                      Write-Host "  ✅ $($_.Name)"
+                    }
+                  }
+                  
+                  # Upload notebooks (inside pipeline folder)
+                  $nb = Join-Path $folder.FullName "notebooks"
+                  if (Test-Path $nb) {
+                    Get-ChildItem $nb -Include *.ipynb,*.py,*.sql -Recurse | ForEach {
+                      $tgt = "$base/notebooks/$($_.Name)"
+                      $fmt = "SOURCE"; $lang = "PYTHON"
+                      if ($_.Extension -eq ".ipynb") { $fmt = "JUPYTER" }
+                      if ($_.Extension -eq ".sql") { $fmt = "SQL"; $lang = "SQL" }
+                      $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
+                      Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/import" -Headers $headers -Method Post -Body (@{path=$tgt;content=$b64;language=$lang;overwrite=$true;format=$fmt}|ConvertTo-Json) | Out-Null
+                      Write-Host "  ✅ $($_.Name)"
+                    }
+                  }
+                  
+                  # Create/update pipeline
+                  $list = Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/pipelines" -Headers $headers -Method Get
+                  $existing = $list.statuses | Where {$_.name -eq $name} | Select -First 1
+                  if ($existing) {
+                    Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/pipelines/$($existing.pipeline_id)" -Headers $headers -Method Put -Body (Get-Content $tmp -Raw) | Out-Null
+                    Write-Host "  ✅ Updated pipeline"
+                  } else {
+                    Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/pipelines" -Headers $headers -Method Post -Body (Get-Content $tmp -Raw) | Out-Null
+                    Write-Host "  ✅ Created pipeline"
+                  }
                 }
                 
-                $pipelineInfo | ConvertTo-Json -Depth 5 | Out-File "$(Agent.TempDirectory)\pipelines.json"
-                Write-Host "`n✅ Pipeline discovery complete"
-              errorActionPreference: 'stop'
+                # Find standalone notebooks (outside pipeline folders)
+                $pipelinePaths = $pipes | ForEach { $_.Directory.Parent.FullName }
+                $nbFolders = Get-ChildItem $src -Directory -Recurse | Where {
+                  $_.Name -in @("notebooks","explorations","analysis") -and
+                  -not ($pipelinePaths | Where { $_.FullName.StartsWith($_) })
+                }
+                
+                Write-Host "`nFound $($nbFolders.Count) standalone notebook folder(s)"
+                
+                # Deploy standalone notebooks
+                foreach ($nbf in $nbFolders) {
+                  Write-Host "`n=== Deploying: $($nbf.Parent.Name)/$($nbf.Name) ==="
+                  $base = "/Workspace/Shared/Notebooks/$($nbf.Parent.Name)/$($nbf.Name)"
+                  
+                  # Create dir
+                  Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/mkdirs" -Headers $headers -Method Post -Body (@{path=$base}|ConvertTo-Json) -ErrorAction SilentlyContinue | Out-Null
+                  
+                  # Upload notebooks
+                  Get-ChildItem $nbf.FullName -Include *.ipynb,*.py,*.sql -Recurse | ForEach {
+                    $tgt = "$base/$($_.Name)"
+                    $fmt = "SOURCE"; $lang = "PYTHON"
+                    if ($_.Extension -eq ".ipynb") { $fmt = "JUPYTER" }
+                    if ($_.Extension -eq ".sql") { $fmt = "SQL"; $lang = "SQL" }
+                    $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
+                    Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/import" -Headers $headers -Method Post -Body (@{path=$tgt;content=$b64;language=$lang;overwrite=$true;format=$fmt}|ConvertTo-Json) | Out-Null
+                    Write-Host "  ✅ $($_.Name)"
+                  }
+                }
+                
+                Write-Host "`n✅ DEV deployment complete!"
 
-          # Step 4: Deploy All Pipelines
+  # ===========================================
+  # STAGE 2: MANUAL APPROVAL
+  # ===========================================
+  - stage: Approval
+    displayName: 'Approval for TEST'
+    dependsOn: Deploy_Dev
+    jobs:
+      - job: Approve
+        displayName: 'Wait for Approval'
+        pool: server
+        timeoutInMinutes: 1440
+        steps:
+          - task: ManualValidation@0
+            inputs:
+              notifyUsers: 'peram.monica@outlook.com'
+              instructions: |
+                DEV deployment done. 
+                Verify and approve to deploy to TEST.
+              onTimeout: 'reject'
+
+  # ===========================================
+  # STAGE 3: DEPLOY TO TEST
+  # ===========================================
+  - stage: Deploy_Test
+    displayName: 'TEST Deployment'
+    dependsOn: Approval
+    variables:
+      - group: test-dlt-vars
+    jobs:
+      - job: DeployTest
+        displayName: 'Deploy to TEST'
+        steps:
           - task: PowerShell@2
-            displayName: 'Deploy All Pipelines and Artifacts'
+            displayName: 'Setup & Deploy'
             inputs:
               targetType: 'inline'
               script: |
-                Write-Host "=============================================="
-                Write-Host "Deploying All Pipelines..."
-                Write-Host "=============================================="
+                # Install CLI
+                pip install databricks-cli --quiet
                 
+                # Configure
                 $env:DATABRICKS_HOST = "$(DATABRICKS_HOST)"
                 $env:DATABRICKS_TOKEN = "$(DATABRICKS_TOKEN)"
+                @"
+                [DEFAULT]
+                host = $(DATABRICKS_HOST)
+                token = $(DATABRICKS_TOKEN)
+                "@ | Out-File "$env:USERPROFILE\.databrickscfg" -Encoding ASCII -Force
                 
-                $pipelines = Get-Content "$(Agent.TempDirectory)\pipelines.json" | ConvertFrom-Json
+                $headers = @{Authorization="Bearer $(DATABRICKS_TOKEN)"; "Content-Type"="application/json"}
+                $src = "$(Build.SourcesDirectory)"
                 
-                $headers = @{
-                  "Authorization" = "Bearer $(DATABRICKS_TOKEN)"
-                  "Content-Type" = "application/json"
-                }
+                # Find all pipelines
+                $pipes = Get-ChildItem $src -Filter "*.json" -Recurse | Where {$_.Directory.Name -eq "pipelines"}
+                Write-Host "Found $($pipes.Count) pipeline(s)"
                 
-                $deploymentSuccess = $true
-                
-                foreach ($pipeline in $pipelines) {
-                  Write-Host "`n=============================================="
-                  Write-Host "Processing Pipeline: $($pipeline.Name)"
-                  Write-Host "=============================================="
+                # Deploy each pipeline
+                foreach ($p in $pipes) {
+                  $name = $p.BaseName
+                  $folder = $p.Directory.Parent
+                  Write-Host "`n=== Deploying: $name ==="
                   
-                  try {
-                    $pipelineName = $pipeline.Name
-                    $targetBase = "$(WORKSPACE_BASE_PATH)/$pipelineName"
-                    
-                    # 1. Create directory structure using API (more reliable than CLI)
-                    Write-Host "`n[1/5] Creating directory structure..."
-                    $directories = @(
-                      "$(WORKSPACE_BASE_PATH)",
-                      "$targetBase",
-                      "$targetBase/transformations",
-                      "$targetBase/utilities"
-                    )
-                    
-                    foreach ($dir in $directories) {
-                      try {
-                        $mkdirUrl = "$(DATABRICKS_HOST)/api/2.0/workspace/mkdirs"
-                        $mkdirBody = @{ path = $dir } | ConvertTo-Json
-                        Invoke-RestMethod -Uri $mkdirUrl -Headers $headers -Method Post -Body $mkdirBody -ErrorAction SilentlyContinue | Out-Null
-                        Write-Host "  ✅ Created: $dir"
-                      } catch {
-                        Write-Host "  ℹ️ Already exists: $dir"
-                      }
+                  $base = "/Workspace/Shared/DLT_Pipelines/$($folder.Name)/$name"
+                  
+                  # Create dirs
+                  @($base, "$base/transformations", "$base/utilities", "$base/notebooks") | ForEach {
+                    Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/mkdirs" -Headers $headers -Method Post -Body (@{path=$_}|ConvertTo-Json) -ErrorAction SilentlyContinue | Out-Null
+                  }
+                  
+                  # Update config
+                  $cfg = Get-Content $p.FullName | ConvertFrom-Json
+                  $cfg.catalog = "$(DLT_CATALOG)"
+                  $cfg.schema = "$(DLT_SCHEMA)"
+                  if (!$cfg.configuration) { $cfg | Add-Member -NotePropertyName configuration -NotePropertyValue @{} }
+                  $cfg.configuration | Add-Member -NotePropertyName 'rsmas.catalog' -NotePropertyValue "$(DLT_CATALOG)" -Force
+                  $cfg.configuration | Add-Member -NotePropertyName 'rsmas.schema' -NotePropertyValue "$(DLT_SCHEMA)" -Force
+                  $cfg.configuration | Add-Member -NotePropertyName 'rsmas.secret.scope' -NotePropertyValue "$(DLT_SECRET_SCOPE)" -Force
+                  if ($cfg.libraries) { $cfg.libraries | ForEach { if ($_.glob) { $_.glob.include = "$base/transformations/**" }}}
+                  
+                  $tmp = "$env:TEMP\$name.json"
+                  $cfg | ConvertTo-Json -Depth 10 | Set-Content $tmp
+                  
+                  # Upload transformations
+                  $trans = Join-Path $folder.FullName "transformations"
+                  if (Test-Path $trans) {
+                    Get-ChildItem $trans -Filter *.py -Recurse | ForEach {
+                      $tgt = "$base/transformations/$($_.Name)"
+                      $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
+                      Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/import" -Headers $headers -Method Post -Body (@{path=$tgt;content=$b64;language="PYTHON";overwrite=$true;format="SOURCE"}|ConvertTo-Json) | Out-Null
+                      Write-Host "  ✅ $($_.Name)"
                     }
-                    
-                    # 2. Update pipeline JSON configuration
-                    Write-Host "`n[2/5] Updating pipeline configuration..."
-                    $config = Get-Content $pipeline.JsonPath -Raw | ConvertFrom-Json
-                    
-                    $config.catalog = "$(DLT_CATALOG)"
-                    $config.schema = "$(DLT_SCHEMA)"
-                    
-                    if (-not $config.configuration) {
-                      $config | Add-Member -MemberType NoteProperty -Name "configuration" -Value @{} -Force
+                  }
+                  
+                  # Upload utilities
+                  $util = Join-Path $folder.FullName "utilities"
+                  if (Test-Path $util) {
+                    Get-ChildItem $util -Include *.ipynb,*.py,*.sql -Recurse | ForEach {
+                      $tgt = "$base/utilities/$($_.Name)"
+                      $fmt = "SOURCE"; $lang = "PYTHON"
+                      if ($_.Extension -eq ".ipynb") { $fmt = "JUPYTER" }
+                      if ($_.Extension -eq ".sql") { $fmt = "SQL"; $lang = "SQL" }
+                      $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
+                      Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/import" -Headers $headers -Method Post -Body (@{path=$tgt;content=$b64;language=$lang;overwrite=$true;format=$fmt}|ConvertTo-Json) | Out-Null
+                      Write-Host "  ✅ $($_.Name)"
                     }
-                    
-                    $config.configuration | Add-Member -MemberType NoteProperty -Name 'rsmas.catalog' -Value "$(DLT_CATALOG)" -Force
-                    $config.configuration | Add-Member -MemberType NoteProperty -Name 'rsmas.schema' -Value "$(DLT_SCHEMA)" -Force
-                    $config.configuration | Add-Member -MemberType NoteProperty -Name 'rsmas.secret.scope' -Value "$(DLT_SECRET_SCOPE)" -Force
-                    
-                    # Update library paths to Workspace
-                    if ($config.libraries) {
-                      foreach ($lib in $config.libraries) {
-                        if ($lib.glob -and $lib.glob.include) {
-                          $lib.glob.include = "$targetBase/transformations/**"
-                        }
-                      }
+                  }
+                  
+                  # Upload notebooks (inside pipeline folder)
+                  $nb = Join-Path $folder.FullName "notebooks"
+                  if (Test-Path $nb) {
+                    Get-ChildItem $nb -Include *.ipynb,*.py,*.sql -Recurse | ForEach {
+                      $tgt = "$base/notebooks/$($_.Name)"
+                      $fmt = "SOURCE"; $lang = "PYTHON"
+                      if ($_.Extension -eq ".ipynb") { $fmt = "JUPYTER" }
+                      if ($_.Extension -eq ".sql") { $fmt = "SQL"; $lang = "SQL" }
+                      $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
+                      Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/import" -Headers $headers -Method Post -Body (@{path=$tgt;content=$b64;language=$lang;overwrite=$true;format=$fmt}|ConvertTo-Json) | Out-Null
+                      Write-Host "  ✅ $($_.Name)"
                     }
-                    
-                    # Update root_path if exists
-                    if ($config.PSObject.Properties.Name -contains 'root_path') {
-                      $config.root_path = $targetBase
-                    }
-                    
-                    $tempConfigPath = "$(Agent.TempDirectory)\$pipelineName`_config.json"
-                    $config | ConvertTo-Json -Depth 10 | Set-Content $tempConfigPath
-                    
-                    Write-Host "  ✅ Configuration updated"
-                    Write-Host "    Catalog: $(DLT_CATALOG)"
-                    Write-Host "    Schema: $(DLT_SCHEMA)"
-                    Write-Host "    Libraries path: $targetBase/transformations/**"
-                    
-                    # 3. Upload transformation scripts using API
-                    Write-Host "`n[3/5] Uploading transformation scripts..."
-                    if (Test-Path $pipeline.TransformationsPath) {
-                      $pyFiles = Get-ChildItem -Path $pipeline.TransformationsPath -Filter *.py -Recurse
-                      $uploadCount = 0
-                      
-                      foreach ($file in $pyFiles) {
-                        $relativePath = $file.FullName.Substring($pipeline.TransformationsPath.Length).TrimStart('\', '/')
-                        $targetFile = "$targetBase/transformations/$($relativePath.Replace('\', '/'))"
-                        
-                        Write-Host "  Uploading: $($file.Name) -> $targetFile"
-                        
-                        try {
-                          # Read file content and encode to base64
-                          $fileContent = [System.IO.File]::ReadAllBytes($file.FullName)
-                          $base64Content = [System.Convert]::ToBase64String($fileContent)
-                          
-                          # Upload using API
-                          $uploadUrl = "$(DATABRICKS_HOST)/api/2.0/workspace/import"
-                          $uploadBody = @{
-                            path = $targetFile
-                            content = $base64Content
-                            language = "PYTHON"
-                            overwrite = $true
-                            format = "SOURCE"
-                          } | ConvertTo-Json
-                          
-                          Invoke-RestMethod -Uri $uploadUrl -Headers $headers -Method Post -Body $uploadBody | Out-Null
-                          Write-Host "    ✅ Uploaded successfully"
-                          $uploadCount++
-                        } catch {
-                          Write-Host "    ❌ Failed: $($_.Exception.Message)"
-                          $deploymentSuccess = $false
-                        }
-                      }
-                      Write-Host "  ✅ Uploaded $uploadCount transformation file(s)"
-                    } else {
-                      Write-Host "  ℹ️ No transformations folder found"
-                    }
-                    
-                    # 4. Upload utility notebooks using API
-                    Write-Host "`n[4/5] Uploading utility notebooks..."
-                    if (Test-Path $pipeline.UtilitiesPath) {
-                      $utilFiles = Get-ChildItem -Path $pipeline.UtilitiesPath -Include *.ipynb,*.py,*.sql -Recurse
-                      $uploadCount = 0
-                      
-                      foreach ($file in $utilFiles) {
-                        $relativePath = $file.FullName.Substring($pipeline.UtilitiesPath.Length).TrimStart('\', '/')
-                        $targetFile = "$targetBase/utilities/$($relativePath.Replace('\', '/'))"
-                        
-                        Write-Host "  Uploading: $($file.Name) -> $targetFile"
-                        
-                        try {
-                          $fileContent = [System.IO.File]::ReadAllBytes($file.FullName)
-                          $base64Content = [System.Convert]::ToBase64String($fileContent)
-                          
-                          $format = "SOURCE"
-                          $language = "PYTHON"
-                          if ($file.Extension -eq ".ipynb") { 
-                            $format = "JUPYTER" 
-                          } elseif ($file.Extension -eq ".sql") { 
-                            $format = "SQL"
-                            $language = "SQL"
-                          }
-                          
-                          $uploadUrl = "$(DATABRICKS_HOST)/api/2.0/workspace/import"
-                          $uploadBody = @{
-                            path = $targetFile
-                            content = $base64Content
-                            language = $language
-                            overwrite = $true
-                            format = $format
-                          } | ConvertTo-Json
-                          
-                          Invoke-RestMethod -Uri $uploadUrl -Headers $headers -Method Post -Body $uploadBody | Out-Null
-                          Write-Host "    ✅ Uploaded successfully"
-                          $uploadCount++
-                        } catch {
-                          Write-Host "    ❌ Failed: $($_.Exception.Message)"
-                        }
-                      }
-                      Write-Host "  ✅ Uploaded $uploadCount utility file(s)"
-                    } else {
-                      Write-Host "  ℹ️ No utilities folder found"
-                    }
-                    
-                    # 5. Create or Update DLT Pipeline
-                    Write-Host "`n[5/5] Creating/Updating DLT pipeline..."
-                    
-                    try {
-                      $listUrl = "$(DATABRICKS_HOST)/api/2.0/pipelines"
-                      $response = Invoke-RestMethod -Uri $listUrl -Headers $headers -Method Get
-                      $existingPipeline = $response.statuses | Where-Object { $_.name -eq $pipelineName } | Select-Object -First 1
-                      
-                      $configJson = Get-Content $tempConfigPath -Raw
-                      
-                      if ($existingPipeline) {
-                        Write-Host "  ℹ️ Pipeline exists (ID: $($existingPipeline.pipeline_id))"
-                        Write-Host "  Updating pipeline..."
-                        
-                        $updateUrl = "$(DATABRICKS_HOST)/api/2.0/pipelines/$($existingPipeline.pipeline_id)"
-                        Invoke-RestMethod -Uri $updateUrl -Headers $headers -Method Put -Body $configJson | Out-Null
-                        
-                        Write-Host "  ✅ Pipeline updated successfully"
-                        Write-Host "  Pipeline ID: $($existingPipeline.pipeline_id)"
-                      } else {
-                        Write-Host "  Creating new pipeline..."
-                        
-                        $createUrl = "$(DATABRICKS_HOST)/api/2.0/pipelines"
-                        $result = Invoke-RestMethod -Uri $createUrl -Headers $headers -Method Post -Body $configJson
-                        
-                        Write-Host "  ✅ Pipeline created successfully"
-                        Write-Host "  Pipeline ID: $($result.pipeline_id)"
-                      }
-                    } catch {
-                      Write-Host "  ❌ Error deploying pipeline: $($_.Exception.Message)"
-                      if ($_.ErrorDetails.Message) {
-                        Write-Host "  Details: $($_.ErrorDetails.Message)"
-                      }
-                      $deploymentSuccess = $false
-                      throw
-                    }
-                    
-                    Write-Host "`n✅ Pipeline '$pipelineName' deployed successfully!"
-                    
-                  } catch {
-                    Write-Host "`n❌ Failed to deploy pipeline '$($pipeline.Name)'"
-                    Write-Host "Error: $($_.Exception.Message)"
-                    $deploymentSuccess = $false
+                  }
+                  
+                  # Create/update pipeline
+                  $list = Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/pipelines" -Headers $headers -Method Get
+                  $existing = $list.statuses | Where {$_.name -eq $name} | Select -First 1
+                  if ($existing) {
+                    Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/pipelines/$($existing.pipeline_id)" -Headers $headers -Method Put -Body (Get-Content $tmp -Raw) | Out-Null
+                    Write-Host "  ✅ Updated pipeline"
+                  } else {
+                    Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/pipelines" -Headers $headers -Method Post -Body (Get-Content $tmp -Raw) | Out-Null
+                    Write-Host "  ✅ Created pipeline"
                   }
                 }
                 
-                Write-Host "`n=============================================="
-                if ($deploymentSuccess) {
-                  Write-Host "✅ ALL PIPELINES DEPLOYED SUCCESSFULLY"
-                  Write-Host "=============================================="
-                } else {
-                  Write-Host "⚠️ DEPLOYMENT COMPLETED WITH SOME ERRORS"
-                  Write-Host "=============================================="
-                  Write-Host "Please check the logs above for details."
-                  exit 1
+                # Find standalone notebooks (outside pipeline folders)
+                $pipelinePaths = $pipes | ForEach { $_.Directory.Parent.FullName }
+                $nbFolders = Get-ChildItem $src -Directory -Recurse | Where {
+                  $_.Name -in @("notebooks","explorations","analysis") -and
+                  -not ($pipelinePaths | Where { $_.FullName.StartsWith($_) })
                 }
-              errorActionPreference: 'stop'
-
-          # Step 5: Deployment Summary
-          - task: PowerShell@2
-            displayName: 'Deployment Summary'
-            inputs:
-              targetType: 'inline'
-              script: |
-                Write-Host ""
-                Write-Host "=============================================="
-                Write-Host "        DEPLOYMENT SUMMARY"
-                Write-Host "=============================================="
                 
-                $pipelines = Get-Content "$(Agent.TempDirectory)\pipelines.json" | ConvertFrom-Json
+                Write-Host "`nFound $($nbFolders.Count) standalone notebook folder(s)"
                 
-                Write-Host "`nEnvironment: TEST"
-                Write-Host "Databricks Host: $(DATABRICKS_HOST)"
-                Write-Host "Target Catalog: $(DLT_CATALOG)"
-                Write-Host "Target Schema: $(DLT_SCHEMA)"
-                Write-Host "Secret Scope: $(DLT_SECRET_SCOPE)"
-                Write-Host ""
-                Write-Host "Deployed Pipelines ($($pipelines.Count)):"
-                foreach ($pipeline in $pipelines) {
-                  Write-Host "  ✅ $($pipeline.Name)"
-                  Write-Host "     Location: $(WORKSPACE_BASE_PATH)/$($pipeline.Name)"
+                # Deploy standalone notebooks
+                foreach ($nbf in $nbFolders) {
+                  Write-Host "`n=== Deploying: $($nbf.Parent.Name)/$($nbf.Name) ==="
+                  $base = "/Workspace/Shared/Notebooks/$($nbf.Parent.Name)/$($nbf.Name)"
+                  
+                  # Create dir
+                  Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/mkdirs" -Headers $headers -Method Post -Body (@{path=$base}|ConvertTo-Json) -ErrorAction SilentlyContinue | Out-Null
+                  
+                  # Upload notebooks
+                  Get-ChildItem $nbf.FullName -Include *.ipynb,*.py,*.sql -Recurse | ForEach {
+                    $tgt = "$base/$($_.Name)"
+                    $fmt = "SOURCE"; $lang = "PYTHON"
+                    if ($_.Extension -eq ".ipynb") { $fmt = "JUPYTER" }
+                    if ($_.Extension -eq ".sql") { $fmt = "SQL"; $lang = "SQL" }
+                    $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
+                    Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/import" -Headers $headers -Method Post -Body (@{path=$tgt;content=$b64;language=$lang;overwrite=$true;format=$fmt}|ConvertTo-Json) | Out-Null
+                    Write-Host "  ✅ $($_.Name)"
+                  }
                 }
-                Write-Host ""
-                Write-Host "=============================================="
-                Write-Host "Next Steps:"
-                Write-Host "  1. Go to $(DATABRICKS_HOST)"
-                Write-Host "  2. Navigate to Workflows > Delta Live Tables"
-                Write-Host "  3. Find your pipeline(s) and click 'Start'"
-                Write-Host "=============================================="
-              errorActionPreference: 'continue'
+                
+                Write-Host "`n✅ TEST deployment complete!"
