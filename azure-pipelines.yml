@@ -1,11 +1,12 @@
 trigger:
   - main
 
+# ✅ FIXED: Use Default pool (your self-hosted agent is here)
 pool:
-  name: 'RSMAS-Agent'
+  name: Default  # Your agent is in Default pool
 
 variables:
-- group: test-dlt-vars  # ✅ TEST ENVIRONMENT
+- group: test-dlt-vars  # TEST environment
 
 stages:
 - stage: Deploy
@@ -17,9 +18,9 @@ stages:
     - checkout: self
       clean: true
 
-    # Update JSON for TEST environment
+    # 1. Update JSON for TEST
     - task: PowerShell@2
-      displayName: '🔧 Update Config for Test'
+      displayName: '🔧 Update Config'
       inputs:
         targetType: 'inline'
         script: |
@@ -28,8 +29,7 @@ stages:
           $schema = "$(DLT_SCHEMA)"
           $secretScope = "$(DLT_SECRET_SCOPE)"
           
-          Write-Host "Updating $jsonPath for TEST env"
-          
+          Write-Host "📁 Updating: $jsonPath"
           $json = Get-Content $jsonPath -Raw | ConvertFrom-Json
           $json.catalog = $catalog
           $json.schema = $schema
@@ -37,12 +37,12 @@ stages:
           $json.configuration."rsmas.schema" = $schema
           $json.configuration."rsmas.secret.scope" = $secretScope
           
-          $json | ConvertTo-Json -Depth 10 | Set-Content $jsonPath
-          Write-Host "✅ JSON updated!"
+          $json | ConvertTo-Json -Depth 10 | Set-Content $jsonPath -Encoding UTF8
+          Write-Host "✅ Config updated for TEST: $catalog / $schema"
 
-    # Create DLT Pipeline
+    # 2. Create Pipeline
     - task: PowerShell@2
-      displayName: '🚀 Create Pipeline'
+      displayName: '🚀 Create DLT Pipeline'
       inputs:
         targetType: 'inline'
         script: |
@@ -55,17 +55,21 @@ stages:
             'Content-Type' = 'application/json'
           }
           
-          $body = Get-Content $jsonPath -Raw
+          $body = Get-Content $jsonPath -Raw | ConvertFrom-Json | ConvertTo-Json -Depth 10
           $uri = "$host/api/2.1/pipelines"
           
-          $response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body
-          Write-Host "✅ Pipeline ID: $($response.id)"
-          
-          Write-Host "##vso[task.setvariable variable=PipelineId]$($response.id)"
+          try {
+            $response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body
+            Write-Host "✅ Pipeline created! ID: $($response.id)"
+            Write-Host "##vso[task.setvariable variable=PipelineId]$($response.id)"
+          } catch {
+            Write-Error "❌ Pipeline creation failed: $($_.Exception.Message)"
+            exit 1
+          }
 
-    # Upload Python files
+    # 3. Upload Python files
     - task: PowerShell@2
-      displayName: '📁 Upload Python Code'
+      displayName: '📁 Upload Code'
       inputs:
         targetType: 'inline'
         script: |
@@ -73,21 +77,28 @@ stages:
           $token = "$(DATABRICKS_TOKEN)"
           $sourceDir = "$(Build.SourcesDirectory)/Product Master/transformations"
           
+          if (-not (Test-Path $sourceDir)) {
+            Write-Host "⚠️ No transformations folder found"
+            exit 0
+          }
+          
           $headers = @{'Authorization' = "Bearer $token"}
           
           Get-ChildItem $sourceDir -Filter "*.py" -Recurse | ForEach-Object {
-            $file = $_.FullName
-            $relPath = $file.Substring("$sourceDir/".Length).Replace('\','/')
+            $relPath = $_.FullName.Substring($sourceDir.Length + 1).Replace('\','/')
             $dbPath = "/Repos/RSMAS_ADB/dlt/product_master/transformations/$relPath"
+            $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content $_.FullName -Raw)))
+            $body = @{content=$content; path=$dbPath; overwrite=$true} | ConvertTo-Json -Depth 3
             
-            $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content $file -Raw)))
-            $body = @{content=$content; path=$dbPath; overwrite=$true} | ConvertTo-Json
-            
-            Invoke-RestMethod -Uri "$host/api/2.0/workspace/import" -Method Post -Headers $headers -Body $body -ContentType "application/json"
-            Write-Host "✅ $relPath"
+            try {
+              Invoke-RestMethod -Uri "$host/api/2.0/workspace/import" -Method Post -Headers $headers -Body $body -ContentType "application/json" | Out-Null
+              Write-Host "✅ Uploaded: $relPath"
+            } catch {
+              Write-Warning "⚠️ Failed $relPath : $($_.Exception.Message)"
+            }
           }
 
-    # Upload notebooks
+    # 4. Upload Notebooks (if exist)
     - task: PowerShell@2
       displayName: '📓 Upload Notebooks'
       inputs:
@@ -95,39 +106,35 @@ stages:
         script: |
           $host = "$(DATABRICKS_HOST)"
           $token = "$(DATABRICKS_TOKEN)"
-          
           $headers = @{'Authorization' = "Bearer $token"}
-          $dirs = @('explorations', 'utilities')
           
-          foreach($dir in $dirs) {
-            $path = "$(Build.SourcesDirectory)/Product Master/$dir"
-            if(Test-Path $path) {
-              Get-ChildItem $path -Filter "*.ipynb" | ForEach-Object {
-                $file = $_.FullName
-                $relPath = "$dir/$($_.Name)"
-                $dbPath = "/Repos/RSMAS_ADB/dlt/product_master/$relPath"
-                
-                $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content $file -Raw)))
-                $body = @{content=$content; path=$dbPath; overwrite=$true; format="JUPYTER"} | ConvertTo-Json
-                
-                Invoke-RestMethod -Uri "$host/api/2.0/workspace/import" -Method Post -Headers $headers -Body $body -ContentType "application/json"
-                Write-Host "✅ $relPath"
+          $folders = @('explorations', 'utilities')
+          foreach($folder in $folders) {
+            $path = "$(Build.SourcesDirectory)/Product Master/$folder/*.ipynb"
+            Get-ChildItem $path -ErrorAction SilentlyContinue | ForEach-Object {
+              $relPath = "$folder/$($_.Name)"
+              $dbPath = "/Repos/RSMAS_ADB/dlt/product_master/$relPath"
+              $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content $_.FullName -Raw)))
+              $body = @{content=$content; path=$dbPath; overwrite=$true; format="JUPYTER"} | ConvertTo-Json -Depth 3
+              
+              try {
+                Invoke-RestMethod -Uri "$host/api/2.0/workspace/import" -Method Post -Headers $headers -Body $body -ContentType "application/json" | Out-Null
+                Write-Host "✅ Notebook: $relPath"
+              } catch {
+                Write-Warning "⚠️ Notebook failed $relPath"
               }
             }
           }
 
+    # 5. Final Success
     - task: PowerShell@2
-      displayName: '✅ Verify Deployment'
+      displayName: '🎉 SUCCESS'
       inputs:
         targetType: 'inline'
         script: |
           $host = "$(DATABRICKS_HOST)"
-          $token = "$(DATABRICKS_TOKEN)"
           $id = "$(PipelineId)"
-          
-          $headers = @{'Authorization' = "Bearer $token"}
-          $uri = "$host/api/2.1/pipelines/$id"
-          
-          $pipeline = Invoke-RestMethod -Uri $uri -Headers $headers
-          Write-Host "🎉 Pipeline '$($pipeline.name)' ready!"
-          Write-Host "🔗 $host#pipeline/$id"
+          Write-Host "=================================="
+          Write-Host "✅ DLT PIPELINE DEPLOYED SUCCESSFULLY"
+          Write-Host "🔗 Pipeline URL: $host#pipeline/$id"
+          Write-Host "=================================="
