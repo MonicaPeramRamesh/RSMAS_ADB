@@ -50,7 +50,7 @@ stages:
                   $folder = $p.Directory.Parent
                   Write-Host "`n=== Deploying: $name ==="
                   
-                  $base = "/Workspace/Shared/DLT_Pipelines/$($folder.Name)/$name"
+                  $base = "/Workspace/Shared/DLT_Pipelines/$name"
                   
                   # Create dirs
                   @($base, "$base/transformations", "$base/utilities", "$base/notebooks") | ForEach-Object {
@@ -137,7 +137,7 @@ stages:
                 # Deploy standalone notebooks
                 foreach ($nbf in $nbFolders) {
                   Write-Host "`n=== Deploying: $($nbf.Parent.Name)/$($nbf.Name) ==="
-                  $base = "/Workspace/Shared/Notebooks/$($nbf.Name)"
+                  $base = "/Workspace/Shared/Notebooks"
                   
                   # Create dir
                   Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/mkdirs" -Headers $headers -Method Post -Body (@{path=$base}|ConvertTo-Json) -ErrorAction SilentlyContinue | Out-Null
@@ -218,7 +218,7 @@ stages:
                   $folder = $p.Directory.Parent
                   Write-Host "`n=== Deploying: $name ==="
                   
-                  $base = "/Workspace/Shared/DLT_Pipelines/$($folder.Name)/$name"
+                  $base = "/Workspace/Shared/DLT_Pipelines/$name"
                   
                   # Create dirs
                   @($base, "$base/transformations", "$base/utilities", "$base/notebooks") | ForEach-Object {
@@ -305,7 +305,7 @@ stages:
                 # Deploy standalone notebooks
                 foreach ($nbf in $nbFolders) {
                   Write-Host "`n=== Deploying: $($nbf.Parent.Name)/$($nbf.Name) ==="
-                  $base = "/Workspace/Shared/Notebooks/$($nbf.Name)"
+                  $base = "/Workspace/Shared/Notebooks"
                   
                   # Create dir
                   Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/mkdirs" -Headers $headers -Method Post -Body (@{path=$base}|ConvertTo-Json) -ErrorAction SilentlyContinue | Out-Null
