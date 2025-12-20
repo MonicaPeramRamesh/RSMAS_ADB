@@ -16,94 +16,65 @@ stages:
     - checkout: self
       clean: true
 
-    # 1. Update JSON
+    # 1. Install Databricks CLI
+    - task: PowerShell@2
+      displayName: '📦 Install Databricks CLI'
+      inputs:
+        targetType: 'inline'
+        script: |
+          pip install databricks-cli
+          Write-Host "✅ Databricks CLI installed"
+
+    # 2. Configure CLI with token
+    - task: PowerShell@2
+      displayName: '🔑 Configure CLI'
+      inputs:
+        targetType: 'inline'
+        script: |
+          databricks configure --token
+          # Echo token to config (CLI reads from stdin)
+          "$(DATABRICKS_TOKEN)" | databricks configure --token
+          "$(DATABRICKS_HOST)" | databricks configure --token
+          Write-Host "✅ CLI configured"
+
+    # 3. Update JSON with Python script
     - task: PowerShell@2
       displayName: '🔧 Update JSON'
       inputs:
         targetType: 'inline'
         script: |
-          $jsonPath = "$(Build.SourcesDirectory)/Product Master/pipelines/product_master.json"
-          $catalog = "$(DLT_CATALOG)"
-          $schema = "$(DLT_SCHEMA)"
-          $secretScope = "$(DLT_SECRET_SCOPE)"
-          
-          $json = Get-Content $jsonPath -Raw | ConvertFrom-Json
-          $json.catalog = $catalog
-          $json.schema = $schema
-          $json.configuration."rsmas.catalog" = $catalog
-          $json.configuration."rsmas.schema" = $schema
-          $json.configuration."rsmas.secret.scope" = $secretScope
-          
-          $json | ConvertTo-Json -Depth 10 | Set-Content $jsonPath
-          Write-Host "✅ Updated: $catalog.$schema"
+          python "$(Build.SourcesDirectory)/Product Master/scripts/update_pipeline_json.py" `
+            --file "$(Build.SourcesDirectory)/Product Master/pipelines/product_master.json" `
+            --catalog "$(DLT_CATALOG)" `
+            --schema "$(DLT_SCHEMA)" `
+            --secret_scope "$(DLT_SECRET_SCOPE)"
+          Write-Host "✅ JSON updated"
 
-    # 2. CORRECT API WITH /workspace/
-    - task: PowerShell@2
-      displayName: '🚀 Create Pipeline'
-      inputs:
-        targetType: 'inline'
-        script: |
-          $dbHost = "$(DATABRICKS_HOST)"
-          $dbToken = "$(DATABRICKS_TOKEN)"
-          $jsonPath = "$(Build.SourcesDirectory)/Product Master/pipelines/product_master.json"
-          
-          # ✅ CORRECT: /workspace/api/2.1/pipelines
-          $apiUrl = "$dbHost/workspace/api/2.1/pipelines"
-          
-          $headers = @{
-            'Authorization' = "Bearer $dbToken"
-            'Content-Type' = 'application/json'
-          }
-          
-          # Delete existing
-          try {
-            $pipelines = Invoke-RestMethod -Uri $apiUrl -Headers $headers
-            $pipelineName = (Get-Content $jsonPath | ConvertFrom-Json).name
-            $existing = $pipelines | Where-Object { $_.name -eq $pipelineName }
-            if ($existing) {
-              $deleteUrl = "$dbHost/workspace/api/2.1/pipelines/$($existing.id)"
-              Invoke-RestMethod -Uri $deleteUrl -Method Delete -Headers $headers
-              Write-Host "🗑️ Deleted: $($existing.id)"
-              Start-Sleep 3
-            }
-          } catch { Write-Host "ℹ️ No existing pipeline" }
-          
-          # Create pipeline
-          $body = Get-Content $jsonPath -Raw
-          $response = Invoke-RestMethod -Uri $apiUrl -Method Post -Headers $headers -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
-          
-          Write-Host "✅ Pipeline ID: $($response.id)"
-          Write-Host "##vso[task.setvariable variable=PipelineId]$($response.id)"
-
-    # 3. Upload Files
+    # 4. Upload files to workspace
     - task: PowerShell@2
       displayName: '📁 Upload Files'
       inputs:
         targetType: 'inline'
         script: |
-          $dbHost = "$(DATABRICKS_HOST)"
-          $dbToken = "$(DATABRICKS_TOKEN)"
-          $wsUrl = "$dbHost/workspace/api/2.0/workspace/import"
-          $headers = @{'Authorization' = "Bearer $dbToken"}
-          
-          $sourceDir = "$(Build.SourcesDirectory)/Product Master/transformations"
-          Get-ChildItem $sourceDir -Filter "*.py" | ForEach-Object {
-            $relPath = "transformations/$($_.Name)"
-            $dbPath = "/Repos/RSMAS_ADB/dlt/product_master/$relPath"
-            $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content $_.FullName -Raw)))
-            $body = @{content=$content; path=$dbPath; overwrite=$true} | ConvertTo-Json -Depth 3
-            
-            Invoke-RestMethod -Uri $wsUrl -Method Post -Headers $headers -Body $body -ContentType "application/json" | Out-Null
-            Write-Host "✅ $relPath"
-          }
+          $sourceDir = "$(Build.SourcesDirectory)/Product Master"
+          databricks workspace import_dir $sourceDir "/Repos/RSMAS_ADB/dlt/product_master" -o '{"overwrite": true}'
+          Write-Host "✅ All files uploaded"
 
-    # 4. Success
+    # 5. Create/Update Pipeline
+    - task: PowerShell@2
+      displayName: '🚀 Create Pipeline'
+      inputs:
+        targetType: 'inline'
+        script: |
+          $jsonPath = "$(Build.SourcesDirectory)/Product Master/pipelines/product_master.json"
+          databricks pipelines create --json-file $jsonPath
+          Write-Host "✅ Pipeline created/updated"
+
+    # 6. Success
     - task: PowerShell@2
       displayName: '🎉 SUCCESS'
       inputs:
         targetType: 'inline'
         script: |
-          $dbHost = "$(DATABRICKS_HOST)"
-          $id = "$(PipelineId)"
-          Write-Host "🚀 DEPLOYED SUCCESSFULLY!"
-          Write-Host "$dbHost#pipeline/$id"
+          Write-Host "🚀 DLT DEPLOYED!"
+          Write-Host "$(DATABRICKS_HOST)#pipeline/"
