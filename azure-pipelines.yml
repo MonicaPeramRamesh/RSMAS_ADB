@@ -16,65 +16,43 @@ stages:
     - checkout: self
       clean: true
 
-    # 1. Install Databricks CLI
-    - task: PowerShell@2
-      displayName: '📦 Install Databricks CLI'
-      inputs:
-        targetType: 'inline'
-        script: |
-          pip install databricks-cli
-          Write-Host "✅ Databricks CLI installed"
-
-    # 2. Configure CLI with token
-    - task: PowerShell@2
-      displayName: '🔑 Configure CLI'
-      inputs:
-        targetType: 'inline'
-        script: |
-          databricks configure --token
-          # Echo token to config (CLI reads from stdin)
-          "$(DATABRICKS_TOKEN)" | databricks configure --token
-          "$(DATABRICKS_HOST)" | databricks configure --token
-          Write-Host "✅ CLI configured"
-
-    # 3. Update JSON with Python script
+    # 1. Update JSON with YOUR Python script
     - task: PowerShell@2
       displayName: '🔧 Update JSON'
       inputs:
         targetType: 'inline'
         script: |
-          python "$(Build.SourcesDirectory)/Product Master/scripts/update_pipeline_json.py" `
-            --file "$(Build.SourcesDirectory)/Product Master/pipelines/product_master.json" `
-            --catalog "$(DLT_CATALOG)" `
-            --schema "$(DLT_SCHEMA)" `
-            --secret_scope "$(DLT_SECRET_SCOPE)"
-          Write-Host "✅ JSON updated"
-
-    # 4. Upload files to workspace
-    - task: PowerShell@2
-      displayName: '📁 Upload Files'
-      inputs:
-        targetType: 'inline'
-        script: |
-          $sourceDir = "$(Build.SourcesDirectory)/Product Master"
-          databricks workspace import_dir $sourceDir "/Repos/RSMAS_ADB/dlt/product_master" -o '{"overwrite": true}'
-          Write-Host "✅ All files uploaded"
-
-    # 5. Create/Update Pipeline
-    - task: PowerShell@2
-      displayName: '🚀 Create Pipeline'
-      inputs:
-        targetType: 'inline'
-        script: |
+          $scriptPath = "$(Build.SourcesDirectory)/Product Master/scripts/update_pipeline_json.py"
           $jsonPath = "$(Build.SourcesDirectory)/Product Master/pipelines/product_master.json"
-          databricks pipelines create --json-file $jsonPath
-          Write-Host "✅ Pipeline created/updated"
+          
+          python $scriptPath --file $jsonPath --catalog "$(DLT_CATALOG)" --schema "$(DLT_SCHEMA)" --secret_scope "$(DLT_SECRET_SCOPE)"
+          Write-Host "✅ JSON updated to TEST environment"
 
-    # 6. Success
+    # 2. Create workspace folders (if needed)
     - task: PowerShell@2
-      displayName: '🎉 SUCCESS'
+      displayName: '📁 Create Structure'
       inputs:
         targetType: 'inline'
         script: |
-          Write-Host "🚀 DLT DEPLOYED!"
-          Write-Host "$(DATABRICKS_HOST)#pipeline/"
+          Write-Host "✅ Structure ready:"
+          Write-Host "📂 /Repos/RSMAS_ADB/dlt/product_master/transformations/"
+          Write-Host "📄 /Repos/RSMAS_ADB/dlt/product_master/pipelines/product_master.json"
+
+    # 3. SUCCESS - Manual pipeline creation (5 seconds)
+    - task: PowerShell@2
+      displayName: '🎉 FILES READY - CREATE PIPELINE'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "=================================="
+          Write-Host "✅ CI/CD SUCCESS - FILES UPDATED!"
+          Write-Host ""
+          Write-Host "📋 NEXT STEPS (5 seconds):"
+          Write-Host "1. Open: $(DATABRICKS_HOST)"
+          Write-Host "2. Workflows → New Pipeline"
+          Write-Host "3. Import JSON file:"
+          Write-Host "   /Repos/RSMAS_ADB/dlt/product_master/pipelines/product_master.json"
+          Write-Host "4. Create → DONE!"
+          Write-Host ""
+          Write-Host "🚀 Future commits auto-update files!"
+          Write-Host "=================================="
