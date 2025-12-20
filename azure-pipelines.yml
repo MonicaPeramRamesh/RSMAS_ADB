@@ -1,66 +1,133 @@
 trigger:
-  branches:
-    include:
-      - main
-  paths:
-    include:
-      - '*/pipelines/*.json'
-      - '*/transformations/**'
+  - main
 
 pool:
-  name: 'Default'
+  name: 'RSMAS-Agent'
 
 variables:
-  - group: test-dlt-vars
+- group: test-dlt-vars  # ✅ TEST ENVIRONMENT
 
 stages:
-  - stage: Deploy
-    jobs:
-      - job: DeployDLT
-        steps:
-          - pwsh: |
-              pip install databricks-cli
-            displayName: 'Install Databricks CLI'
+- stage: Deploy
+  displayName: 'Deploy DLT to Test'
+  jobs:
+  - job: DeployDLT
+    displayName: 'Deploy Pipeline'
+    steps:
+    - checkout: self
+      clean: true
 
-          - pwsh: |
-              $env:DATABRICKS_HOST = "$(DATABRICKS_HOST)"
-              $env:DATABRICKS_TOKEN = "$(DATABRICKS_TOKEN)"
-              
-              # Update pipeline configs
-              Get-ChildItem -Path "." -Filter "*.json" -Recurse | Where-Object { $_.Directory.Name -eq "pipelines" } | ForEach-Object {
-                python scripts/update_pipeline_json.py --file "$($_.FullName)" --catalog "$(DLT_CATALOG)" --schema "$(DLT_SCHEMA)" --secret_scope "$(DLT_SECRET_SCOPE)"
-              }
-              
-              # Deploy files to workspace
-              Get-ChildItem -Path "." -Directory | Where-Object { Test-Path "$($_.FullName)/pipelines" } | ForEach-Object {
-                $project = $_.Name
-                $reposPath = "/Repos/RSMAS_ADB/dlt/$project"
+    # Update JSON for TEST environment
+    - task: PowerShell@2
+      displayName: '🔧 Update Config for Test'
+      inputs:
+        targetType: 'inline'
+        script: |
+          $jsonPath = "$(Build.SourcesDirectory)/Product Master/pipelines/product_master.json"
+          $catalog = "$(DLT_CATALOG)"
+          $schema = "$(DLT_SCHEMA)"
+          $secretScope = "$(DLT_SECRET_SCOPE)"
+          
+          Write-Host "Updating $jsonPath for TEST env"
+          
+          $json = Get-Content $jsonPath -Raw | ConvertFrom-Json
+          $json.catalog = $catalog
+          $json.schema = $schema
+          $json.configuration."rsmas.catalog" = $catalog
+          $json.configuration."rsmas.schema" = $schema
+          $json.configuration."rsmas.secret.scope" = $secretScope
+          
+          $json | ConvertTo-Json -Depth 10 | Set-Content $jsonPath
+          Write-Host "✅ JSON updated!"
+
+    # Create DLT Pipeline
+    - task: PowerShell@2
+      displayName: '🚀 Create Pipeline'
+      inputs:
+        targetType: 'inline'
+        script: |
+          $host = "$(DATABRICKS_HOST)"
+          $token = "$(DATABRICKS_TOKEN)"
+          $jsonPath = "$(Build.SourcesDirectory)/Product Master/pipelines/product_master.json"
+          
+          $headers = @{
+            'Authorization' = "Bearer $token"
+            'Content-Type' = 'application/json'
+          }
+          
+          $body = Get-Content $jsonPath -Raw
+          $uri = "$host/api/2.1/pipelines"
+          
+          $response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body
+          Write-Host "✅ Pipeline ID: $($response.id)"
+          
+          Write-Host "##vso[task.setvariable variable=PipelineId]$($response.id)"
+
+    # Upload Python files
+    - task: PowerShell@2
+      displayName: '📁 Upload Python Code'
+      inputs:
+        targetType: 'inline'
+        script: |
+          $host = "$(DATABRICKS_HOST)"
+          $token = "$(DATABRICKS_TOKEN)"
+          $sourceDir = "$(Build.SourcesDirectory)/Product Master/transformations"
+          
+          $headers = @{'Authorization' = "Bearer $token"}
+          
+          Get-ChildItem $sourceDir -Filter "*.py" -Recurse | ForEach-Object {
+            $file = $_.FullName
+            $relPath = $file.Substring("$sourceDir/".Length).Replace('\','/')
+            $dbPath = "/Repos/RSMAS_ADB/dlt/product_master/transformations/$relPath"
+            
+            $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content $file -Raw)))
+            $body = @{content=$content; path=$dbPath; overwrite=$true} | ConvertTo-Json
+            
+            Invoke-RestMethod -Uri "$host/api/2.0/workspace/import" -Method Post -Headers $headers -Body $body -ContentType "application/json"
+            Write-Host "✅ $relPath"
+          }
+
+    # Upload notebooks
+    - task: PowerShell@2
+      displayName: '📓 Upload Notebooks'
+      inputs:
+        targetType: 'inline'
+        script: |
+          $host = "$(DATABRICKS_HOST)"
+          $token = "$(DATABRICKS_TOKEN)"
+          
+          $headers = @{'Authorization' = "Bearer $token"}
+          $dirs = @('explorations', 'utilities')
+          
+          foreach($dir in $dirs) {
+            $path = "$(Build.SourcesDirectory)/Product Master/$dir"
+            if(Test-Path $path) {
+              Get-ChildItem $path -Filter "*.ipynb" | ForEach-Object {
+                $file = $_.FullName
+                $relPath = "$dir/$($_.Name)"
+                $dbPath = "/Repos/RSMAS_ADB/dlt/product_master/$relPath"
                 
-                databricks workspace mkdirs "$reposPath/transformations"
-                Get-ChildItem "$($_.FullName)/transformations" -Filter "*.py" | ForEach-Object {
-                  databricks workspace import "$($_.FullName)" "$reposPath/transformations/$($_.Name)" --language PYTHON --overwrite
-                }
+                $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content $file -Raw)))
+                $body = @{content=$content; path=$dbPath; overwrite=$true; format="JUPYTER"} | ConvertTo-Json
                 
-                Get-ChildItem "$($_.FullName)" -Filter "*.ipynb" | ForEach-Object {
-                  databricks workspace import "$($_.FullName)" "$reposPath/$($_.BaseName)" --language PYTHON --format JUPYTER --overwrite
-                }
+                Invoke-RestMethod -Uri "$host/api/2.0/workspace/import" -Method Post -Headers $headers -Body $body -ContentType "application/json"
+                Write-Host "✅ $relPath"
               }
-              
-              # Deploy DLT pipelines
-              Get-ChildItem -Path "." -Filter "*.json" -Recurse | Where-Object { $_.Directory.Name -eq "pipelines" } | ForEach-Object {
-                $config = Get-Content $_.FullName -Raw | ConvertFrom-Json
-                $existing = databricks pipelines get --pipeline-name "$($config.name)" 2>$null
-                
-                if ($LASTEXITCODE -eq 0) {
-                  $id = ($existing | ConvertFrom-Json).pipeline_id
-                  $config | ConvertTo-Json -Depth 10 -Compress | databricks pipelines update --pipeline-id "$id" --spec-json-input
-                } else {
-                  $config | ConvertTo-Json -Depth 10 -Compress | databricks pipelines create --spec-json-input
-                }
-              }
-              
-              Write-Host "✅ Deployment complete"
-            displayName: 'Deploy to Databricks'
-            env:
-              DATABRICKS_HOST: $(DATABRICKS_HOST)
-              DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+            }
+          }
+
+    - task: PowerShell@2
+      displayName: '✅ Verify Deployment'
+      inputs:
+        targetType: 'inline'
+        script: |
+          $host = "$(DATABRICKS_HOST)"
+          $token = "$(DATABRICKS_TOKEN)"
+          $id = "$(PipelineId)"
+          
+          $headers = @{'Authorization' = "Bearer $token"}
+          $uri = "$host/api/2.1/pipelines/$id"
+          
+          $pipeline = Invoke-RestMethod -Uri $uri -Headers $headers
+          Write-Host "🎉 Pipeline '$($pipeline.name)' ready!"
+          Write-Host "🔗 $host#pipeline/$id"
