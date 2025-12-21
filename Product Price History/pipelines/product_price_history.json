@@ -1,5 +1,5 @@
 {
-  "name": "product_master",
+  "name": "product_price_history",
   "pipeline_type": "WORKSPACE",
 
   "libraries": [
