@@ -1,0 +1,29 @@
+{
+  "name": "product_master",
+  "pipeline_type": "WORKSPACE",
+
+  "libraries": [
+    {
+      "glob": {
+        "include": "/Workspace/Shared/DLT_Pipelines/supplier_cost_price_history/transformations/**"
+      }
+    }
+  ],
+
+  "root_path": "/Workspace/Shared/DLT_Pipelines/supplier_cost_price_history",
+
+  "catalog": "dev_rsmas_catalog",
+  "schema": "rsmas_schema",
+
+  "continuous": false,
+  "development": false,
+  "photon": true,
+  "serverless": true,
+  "channel": "CURRENT",
+
+  "configuration": {
+    "rsmas.catalog": "dev_rsmas_catalog",
+    "rsmas.schema": "rsmas_schema",
+    "rsmas.secret.scope": "rsmas-dev-scope"
+  }
+}
