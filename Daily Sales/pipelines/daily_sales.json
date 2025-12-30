@@ -1,5 +1,5 @@
 {
-  "name": "product_master",
+  "name": "daily_sles",
   "pipeline_type": "WORKSPACE",
 
   "libraries": [
