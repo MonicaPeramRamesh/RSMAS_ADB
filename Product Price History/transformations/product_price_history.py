@@ -3,6 +3,12 @@ from pyspark.sql.functions import (
     col, lower, when, lit, current_timestamp, expr, coalesce, to_timestamp
 )
 
+# ---------------------------------------------------------
+# Read runtime configuration from pipeline
+# ---------------------------------------------------------
+CATALOG = spark.conf.get("rsclp.catalog")
+SCHEMA = spark.conf.get("rsclp.schema")
+
 # =========================================================
 # 1️⃣ Paths
 # =========================================================
@@ -15,7 +21,7 @@ bronze_path = dbutils.secrets.get(
 # 2️⃣ Bronze Layer – Raw Product Price Updates
 # =========================================================
 @dlt.table(
-    name="dev_rsclp_catalog.rsclp_productmaster_schema.product_price_updates",
+    name=f"{CATALOG}.{SCHEMA}.product_price_updates",
     comment="Raw product price updates ingested from Excel to Delta staging"
 )
 def product_price_updates():
@@ -44,7 +50,7 @@ def product_price_updates():
 # Create target table if not exists
 try:
     dlt.create_target_table(
-        name="dev_rsclp_catalog.rsclp_productmaster_schema.product_price_history",
+        name=f"{CATALOG}.{SCHEMA}.product_price_history",
         comment="SCD Type 2 table storing full history of product price changes per store"
     )
 except Exception as e:
@@ -54,8 +60,8 @@ except Exception as e:
 # 4️⃣ Apply SCD Type 2 logic
 # =========================================================
 dlt.apply_changes(
-    target="dev_rsclp_catalog.rsclp_productmaster_schema.product_price_history",
-    source="dev_rsclp_catalog.rsclp_productmaster_schema.product_price_updates",
+    target=f"{CATALOG}.{SCHEMA}.product_price_history",
+    source=f"{CATALOG}.{SCHEMA}.product_price_updates",
     keys=["ProductID", "StoreID"],                 # Business keys
     sequence_by=col("UpdatedOn"),                # Sequencing column
     stored_as_scd_type="2",                        # Type 2 = history tracking

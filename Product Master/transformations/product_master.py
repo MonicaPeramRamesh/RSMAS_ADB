@@ -6,7 +6,6 @@ from pyspark.sql.functions import col, lower, when, lit, expr
 # ---------------------------------------------------------
 CATALOG = spark.conf.get("rsclp.catalog")
 SCHEMA = spark.conf.get("rsclp.schema")
-SECRET_SCOPE = spark.conf.get("rsclp.secret.scope")
 
 BASE_PATH = dbutils.secrets.get(
     scope='rsclp-scope',

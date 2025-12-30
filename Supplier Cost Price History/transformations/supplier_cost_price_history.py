@@ -4,6 +4,12 @@ from pyspark.sql.functions import (
     col, lower, when, lit, current_timestamp, expr, coalesce, to_timestamp
 )
 
+# ---------------------------------------------------------
+# Read runtime configuration from pipeline
+# ---------------------------------------------------------
+CATALOG = spark.conf.get("rsclp.catalog")
+SCHEMA = spark.conf.get("rsclp.schema")
+
 # =========================================================
 # 1️⃣ Paths
 # =========================================================
@@ -13,7 +19,7 @@ supplier_pricehistory_path = dbutils.secrets.get(scope='rsclp-scope', key='maste
 # 2️⃣ Bronze Layer – Raw Product Price Updates
 # =========================================================
 @dlt.table(
-    name="dev_rsclp_catalog.rsclp_productmaster_schema.supplier_costprice_updates",
+    name=f"{CATALOG}.{SCHEMA}.supplier_costprice_updates",
     comment="Raw product price updates ingested from Excel to Delta staging"
 )
 def product_price_updates():
@@ -42,7 +48,7 @@ def product_price_updates():
 # Create target table if not exists
 try:
     dlt.create_target_table(
-        name="dev_rsclp_catalog.rsclp_productmaster_schema.supplier_costprice_history",
+        name=f"{CATALOG}.{SCHEMA}.supplier_costprice_history",
         comment="SCD Type 2 table storing full history of product price changes per store"
     )
 except Exception as e:
@@ -52,8 +58,8 @@ except Exception as e:
 # 4️⃣ Apply SCD Type 2 logic
 # =========================================================
 dlt.apply_changes(
-    target="dev_rsclp_catalog.rsclp_productmaster_schema.supplier_costprice_history",
-    source="dev_rsclp_catalog.rsclp_productmaster_schema.supplier_costprice_updates",
+    target=f"{CATALOG}.{SCHEMA}.supplier_costprice_history",
+    source=f"{CATALOG}.{SCHEMA}.supplier_costprice_updates",
     keys=["ProductID"],                 # Business keys
     sequence_by=col("UpdatedOn"),                # Sequencing column
     stored_as_scd_type="2",                        # Type 2 = history tracking

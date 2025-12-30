@@ -13,7 +13,7 @@
   "root_path": "/Workspace/Shared/DLT_Pipelines/supplier_cost_price_history",
 
   "catalog": "dev_rsclp_catalog",
-  "schema": "rsclp_schema",
+  "schema": "rsclp_productmaster_schema",
 
   "continuous": false,
   "development": false,
@@ -23,7 +23,7 @@
 
   "configuration": {
     "rsclp.catalog": "dev_rsclp_catalog",
-    "rsclp.schema": "rsclp_schema",
+    "rsclp.schema": "rsclp_productmaster_schema",
     "rsclp.secret.scope": "rsclp-scope"
   }
 }
