@@ -28,13 +28,13 @@ target_date = dbutils.widgets.get('date')
 
 # COMMAND ----------
 
-jdbc_url = dbutils.secrets.get(scope=SECRET_SCOPE, key='jdbc-url')
-database = dbutils.secrets.get(scope=SECRET_SCOPE, key='rsmas-database')
-username = dbutils.secrets.get(scope=SECRET_SCOPE, key='rsmas-db-username')
-password = dbutils.secrets.get(scope=SECRET_SCOPE, key='rsmas-db-password')
-driver = dbutils.secrets.get(scope=SECRET_SCOPE, key='rsmas-db-driver')
-hostname = dbutils.secrets.get(scope=SECRET_SCOPE, key='rsmas-db-hostname')
-port = dbutils.secrets.get(scope=SECRET_SCOPE, key='rsmas-db-port')
+jdbc_url = dbutils.secrets.get(scope='rsclp-scope', key='jdbc-url')
+database = dbutils.secrets.get(scope='rsclp-scope', key='rsclp-database')
+username = dbutils.secrets.get(scope='rsclp-scope', key='rsclp-db-username')
+password = dbutils.secrets.get(scope='rsclp-scope', key='rsclp-db-password')
+driver = dbutils.secrets.get(scope='rsclp-scope', key='rsclp-db-driver')
+hostname = dbutils.secrets.get(scope='rsclp-scope', key='rsclp-db-hostname')
+port = dbutils.secrets.get(scope='rsclp-scope', key='rsclp-db-port')
 
 # COMMAND ----------
 
