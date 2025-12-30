@@ -1,5 +1,5 @@
 {
-  "name": "product_master",
+  "name": "supplier_orders",
   "pipeline_type": "WORKSPACE",
 
   "libraries": [
