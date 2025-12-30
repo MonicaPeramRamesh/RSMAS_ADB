@@ -1,11 +1,11 @@
 {
-  "name": "daily_sles",
+  "name": "daily_sales",
   "pipeline_type": "WORKSPACE",
 
   "libraries": [
     {
       "glob": {
-        "include": "/Workspace/Shared/DLT_Pipelines/daily_sles/transformations/**"
+        "include": "/Workspace/Shared/DLT_Pipelines/daily_sales/transformations/**"
       }
     }
   ],
