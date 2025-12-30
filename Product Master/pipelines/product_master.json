@@ -12,8 +12,8 @@
 
   "root_path": "/Workspace/Shared/DLT_Pipelines/product_master",
 
-  "catalog": "dev_rsmas_catalog",
-  "schema": "rsmas_productmaster_schema",
+  "catalog": "dev_rsclp_catalog",
+  "schema": "rsclp_productmaster_schema",
 
   "continuous": false,
   "development": false,
@@ -22,8 +22,8 @@
   "channel": "CURRENT",
 
   "configuration": {
-    "rsmas.catalog": "dev_rsmas_catalog",
-    "rsmas.schema": "rsmas_productmaster_schema",
-    "rsmas.secret.scope": "rsmas-dev-scope"
+    "rsmas.catalog": "dev_rsclp_catalog",
+    "rsmas.schema": "rsclp_productmaster_schema",
+    "rsmas.secret.scope": "rsclp-scope"
   }
 }

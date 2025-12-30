@@ -12,8 +12,8 @@
 
   "root_path": "/Workspace/Shared/DLT_Pipelines/product_price_history",
 
-  "catalog": "dev_rsmas_catalog",
-  "schema": "rsmas_schema",
+  "catalog": "dev_rsclp_catalog",
+  "schema": "rsclp_schema",
 
   "continuous": false,
   "development": false,
@@ -22,8 +22,8 @@
   "channel": "CURRENT",
 
   "configuration": {
-    "rsmas.catalog": "dev_rsmas_catalog",
-    "rsmas.schema": "rsmas_schema",
-    "rsmas.secret.scope": "rsmas-dev-scope"
+    "rsclp.catalog": "dev_rsclp_catalog",
+    "rsclp.schema": "rsclp_schema",
+    "rsclp.secret.scope": "rsclp-scope"
   }
 }

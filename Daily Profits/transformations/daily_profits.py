@@ -11,9 +11,9 @@ today_bst = datetime.now(ZoneInfo("Europe/London")).strftime("%Y-%m-%d")
 
 
 @dlt.table(
-    name="rsmas_catalog.rsmas_gold_schema.daily_profits",
+    name="rsclp_catalog.rsclp_gold_schema.daily_profits",
     comment="Daily profits by product, store, and date",
-    partition_cols=["loa_date"]
+    partition_cols=["load_date"]
 )
 def daily_profits():
 
@@ -21,7 +21,7 @@ def daily_profits():
     # 1️⃣ INBOUND DELIVERIES (Cost Data)
     # -------------------------------
     inbound_df = (
-        spark.read.table("rsmas_catalog.rsmas_gold_schema.inbound_deliveries")
+        spark.read.table("dev_rsclp_catalog.rsclp_gold_schema.inbound_deliveries")
         .filter(col("load_date") == today_bst)
         .select(
             col("ProductID").alias("in_ProductID"),
@@ -41,7 +41,7 @@ def daily_profits():
     # 2️⃣ DAILY SALES (Revenue Data)
     # -------------------------------
     sales_df = (
-        spark.read.table("rsmas_catalog.rsmas_gold_schema.daily_sales")
+        spark.read.table("dev_rsclp_catalog.rsclp_gold_schema.daily_sales")
         .filter(col("TransactionDate") == today_bst)
         .select(
             col("ProductID").alias("s_ProductID"),

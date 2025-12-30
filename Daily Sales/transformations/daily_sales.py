@@ -5,7 +5,7 @@ Retail Sales Management System - Delta Live Tables Pipeline
 Purpose: Process daily sales data through Bronze -> Silver -> Gold layers
 Pre-requisites: 
   - ADF pipeline validates schema (column names, count) before triggering DLT
-  - Product master table must exist: dev_rsmas_catalog.rsmas_productmaster_schema.product_master
+  - Product master table must exist: dev_rsclp_catalog.rsclp_productmaster_schema.product_master
   
 Layers:
   - Bronze: Raw ingestion from ADLS CSV files
@@ -57,17 +57,17 @@ def log(stage: str, message: str, level: str = "info"):
 # Secret Retrieval with Error Handling
 # ------------------------------
 try:
-    bronze_path = dbutils.secrets.get(scope='rsmas-dev-scope', key='bronze-path')
-    silver_path = dbutils.secrets.get(scope='rsmas-dev-scope', key='silver-path')
-    gold_path   = dbutils.secrets.get(scope='rsmas-dev-scope', key='gold-path')
-    source_path = dbutils.secrets.get(scope='rsmas-dev-scope', key='source-path')
-    jdbc_url = dbutils.secrets.get(scope='rsmas-dev-scope', key='jdbc-url')
-    database = dbutils.secrets.get(scope='rsmas-dev-scope', key='rsmas-database')
-    username = dbutils.secrets.get(scope='rsmas-dev-scope', key='rsmas-db-username')
-    password = dbutils.secrets.get(scope='rsmas-dev-scope', key='rsmas-db-password')
-    driver = dbutils.secrets.get(scope='rsmas-dev-scope', key='rsmas-db-driver')
-    hostname = dbutils.secrets.get(scope='rsmas-dev-scope', key='rsmas-db-hostname')
-    port = dbutils.secrets.get(scope='rsmas-dev-scope', key='rsmas-db-port')
+    bronze_path = dbutils.secrets.get(scope='rsclp-scope', key='bronze-path')
+    silver_path = dbutils.secrets.get(scope='rsclp-scope', key='silver-path')
+    gold_path   = dbutils.secrets.get(scope='rsclp-scope', key='gold-path')
+    source_path = dbutils.secrets.get(scope='rsclp-scope', key='source-path')
+    jdbc_url = dbutils.secrets.get(scope='rsclp-scope', key='jdbc-url')
+    database = dbutils.secrets.get(scope='rsclp-scope', key='rsclp-database')
+    username = dbutils.secrets.get(scope='rsclp-scope', key='rsclp-db-username')
+    password = dbutils.secrets.get(scope='rsclp-scope', key='rsclp-db-password')
+    driver = dbutils.secrets.get(scope='rsclp-scope', key='rsclp-db-driver')
+    hostname = dbutils.secrets.get(scope='rsclp-scope', key='rsclp-db-hostname')
+    port = dbutils.secrets.get(scope='rsclp-scope', key='rsclp-db-port')
     log("INIT", "Secrets retrieved successfully")
 except Exception as e:
     log("INIT", f"CRITICAL: Failed to retrieve secrets: {e}", level="error")
@@ -101,7 +101,7 @@ daily_sales_silver_rules = {
 # BRONZE LAYER: Raw Data Ingestion
 # ------------------------------
 @dlt.table(
-    name='dev_rsmas_catalog.rsmas_bronze_schema.daily_sales',
+    name='dev_rsclp_catalog.rsclp_bronze_schema.daily_sales',
     comment='Bronze layer: Raw incremental ingestion of daily sales from ADLS (schema pre-validated by ADF)',
     partition_cols=['TransactionDate'],
     table_properties={
@@ -163,7 +163,7 @@ def parsed_sales_view():
     parsed_json != NULL => can be exploded
     """
     log("INTERMEDIATE", "Parsing ProductDetailsJson into parsed_json (single parse)")
-    bronze_df = dlt.read_stream("dev_rsmas_catalog.rsmas_bronze_schema.daily_sales")
+    bronze_df = dlt.read_stream("dev_rsclp_catalog.rsclp_bronze_schema.daily_sales")
     parsed = bronze_df.withColumn("parsed_json", F.from_json(F.col("ProductDetailsJson"), product_schema))
     log("INTERMEDIATE", "parsed_sales_view created")
     return parsed
@@ -209,7 +209,7 @@ def exploded_sales_view():
 # SILVER LAYER: Cleansed & Enriched Data
 # ------------------------------
 @dlt.table(
-    name="dev_rsmas_catalog.rsmas_silver_schema.daily_sales",
+    name="dev_rsclp_catalog.rsclp_silver_schema.daily_sales",
     comment='Silver layer: Cleansed sales data with exploded JSON, enriched with product master, quality validated',
     partition_cols=['TransactionDate'],
     table_properties={
@@ -257,7 +257,7 @@ def daily_sales_silver():
     )
 
     log("SILVER", "Reading product master and broadcasting for enrichment")
-    product_df = spark.read.table("dev_rsmas_catalog.rsmas_productmaster_schema.product_master")
+    product_df = spark.read.table("dev_rsclp_catalog.rsclp_productmaster_schema.product_master")
     product_small = product_df.select(
         "ProductID", "ProductName", "CategoryID", "DepartmentID", "Description", "UnitOfMeasure", "__START_AT", "__END_AT"
     ).filter(F.col('__END_AT').isNull())
@@ -293,7 +293,7 @@ def daily_sales_silver():
 # GOLD LAYER: Aggregated Analytics
 # ------------------------------
 @dlt.table(
-    name='dev_rsmas_catalog.rsmas_gold_schema.daily_sales',
+    name='dev_rsclp_catalog.rsclp_gold_schema.daily_sales',
     comment='Gold layer: Aggregated daily sales metrics by date, store, product, and price point for analytics and reporting',
     partition_cols=["TransactionDate"],
     table_properties={
@@ -334,7 +334,7 @@ def daily_sales_gold():
     """
     log("GOLD", "Reading silver for aggregation")
     # 1. Read only new Silver rows (incremental)
-    silver_stream = dlt.read_stream("dev_rsmas_catalog.rsmas_silver_schema.daily_sales")
+    silver_stream = dlt.read_stream("dev_rsclp_catalog.rsclp_silver_schema.daily_sales")
 
     # 2. Add watermark (OPTIONAL - does NOT change what data is read)
     #    Allows Spark to discard very late events
@@ -366,7 +366,7 @@ def daily_sales_gold():
 # QUARANTINE LAYER: Invalid Records
 # ------------------------------
 @dlt.table(
-    name='dev_rsmas_catalog.rsmas_invalid_data_schema.invalid_daily_sales',
+    name='dev_rsclp_catalog.rsclp_invalid_data_schema.invalid_daily_sales',
     comment='Quarantine layer: All invalid/rejected sales records with comprehensive failure reasons for data quality monitoring',
     partition_cols=['TransactionDate'],
     table_properties={
@@ -406,10 +406,10 @@ def invalid_daily_sales():
 
     parsed_stream = dlt.read_stream("parsed_sales_view")
     exploded_stream = dlt.read_stream("exploded_sales_view")
-    bronze_stream = dlt.read_stream("dev_rsmas_catalog.rsmas_bronze_schema.daily_sales")
+    bronze_stream = dlt.read_stream("dev_rsclp_catalog.rsclp_bronze_schema.daily_sales")
 
     product_df = (
-        spark.read.table("dev_rsmas_catalog.rsmas_productmaster_schema.product_master").filter(F.col('__END_AT').isNull())
+        spark.read.table("dev_rsclp_catalog.rsclp_productmaster_schema.product_master").filter(F.col('__END_AT').isNull())
             .select("ProductID")
             .cache()
     )
@@ -548,7 +548,7 @@ def invalid_daily_sales():
 # Invalid Sales Summary View
 # ------------------------------
 @dlt.table(
-    name='dev_rsmas_catalog.rsmas_monitor_schema.invalid_sales_summary',
+    name='dev_rsclp_catalog.rsclp_monitor_schema.invalid_sales_summary',
     comment='Monitoring view: Aggregated invalid sales by date, type, and reason - for data quality dashboards'
 )
 def invalid_sales_summary():
@@ -574,7 +574,7 @@ def invalid_sales_summary():
     Returns:
         DataFrame: Aggregated invalid sales summary
     """
-    quarantine_stream = dlt.read_stream("dev_rsmas_catalog.rsmas_invalid_data_schema.invalid_daily_sales") \
+    quarantine_stream = dlt.read_stream("dev_rsclp_catalog.rsclp_invalid_data_schema.invalid_daily_sales") \
                            .withWatermark("LoadTimestamp", "1 hour")
     return (quarantine_stream.groupBy("TransactionDateCategory", "InvalidationType", "Reason")
             .agg(
@@ -590,7 +590,7 @@ def invalid_sales_summary():
 # Pipeline Health Metrics View
 # ------------------------------
 @dlt.table(
-    name='dev_rsmas_catalog.rsmas_monitor_schema.daily_pipeline_metrics',
+    name='dev_rsclp_catalog.rsclp_monitor_schema.daily_pipeline_metrics',
     comment='Monitoring view: Daily pipeline health metrics - valid vs invalid records with success rate'
 )
 def daily_pipeline_metrics():
@@ -613,7 +613,7 @@ def daily_pipeline_metrics():
         DataFrame: Daily pipeline metrics
     """
     # VALID RECORDS
-    silver = (dlt.read_stream("dev_rsmas_catalog.rsmas_silver_schema.daily_sales")
+    silver = (dlt.read_stream("dev_rsclp_catalog.rsclp_silver_schema.daily_sales")
                 .withWatermark("LoadTimestamp", "1 hour")
                 .withColumn("is_valid", F.lit(1))
                 .withColumn("is_invalid", F.lit(0))
@@ -633,7 +633,7 @@ def daily_pipeline_metrics():
                 .select("TransactionDateCategory", "is_valid", "is_invalid")
     )
 
-    invalid = (dlt.read_stream("dev_rsmas_catalog.rsmas_invalid_data_schema.invalid_daily_sales")
+    invalid = (dlt.read_stream("dev_rsclp_catalog.rsclp_invalid_data_schema.invalid_daily_sales")
                   .withWatermark("LoadTimestamp", "1 hour")
                   .withColumn("is_valid", F.lit(0))
                   .withColumn("is_invalid", F.lit(1))

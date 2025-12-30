@@ -6,13 +6,16 @@ from pyspark.sql.functions import (
 # =========================================================
 # 1️⃣ Paths
 # =========================================================
-bronze_path = "abfss://master-data@rsmasdevneadls.dfs.core.windows.net/product/product_price_updates/"
+bronze_path = dbutils.secrets.get(
+    scope='rsclp-scope',
+    key="master-data-path"
+)+ 'product_price_updates'
 
 # =========================================================
 # 2️⃣ Bronze Layer – Raw Product Price Updates
 # =========================================================
 @dlt.table(
-    name="rsmas_catalog.rsmas_productmaster_schema.product_price_updates",
+    name="dev_rsclp_catalog.rsclp_productmaster_schema.product_price_updates",
     comment="Raw product price updates ingested from Excel to Delta staging"
 )
 def product_price_updates():
@@ -41,7 +44,7 @@ def product_price_updates():
 # Create target table if not exists
 try:
     dlt.create_target_table(
-        name="rsmas_catalog.rsmas_productmaster_schema.product_price_history",
+        name="dev_rsclp_catalog.rsclp_productmaster_schema.product_price_history",
         comment="SCD Type 2 table storing full history of product price changes per store"
     )
 except Exception as e:
@@ -51,8 +54,8 @@ except Exception as e:
 # 4️⃣ Apply SCD Type 2 logic
 # =========================================================
 dlt.apply_changes(
-    target="rsmas_catalog.rsmas_productmaster_schema.product_price_history",
-    source="rsmas_catalog.rsmas_productmaster_schema.product_price_updates",
+    target="dev_rsclp_catalog.rsclp_productmaster_schema.product_price_history",
+    source="dev_rsclp_catalog.rsclp_productmaster_schema.product_price_updates",
     keys=["ProductID", "StoreID"],                 # Business keys
     sequence_by=col("UpdatedOn"),                # Sequencing column
     stored_as_scd_type="2",                        # Type 2 = history tracking
