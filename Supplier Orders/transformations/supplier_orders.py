@@ -225,7 +225,7 @@ def exploded_orders_view():
 
 # ==================== SILVER LAYER ====================
 @dlt.table(
-    name="rsclp_catalog.rsclp_silver_schema.supplier_orders",
+    name=f"{CATALOG}.rsclp_silver_schema.supplier_orders",
     comment='Silver: Validated orders (only valid records)',
     partition_cols=['OrderDate'],
     table_properties={
@@ -276,7 +276,7 @@ def supplier_orders_silver():
     
     # Product master with explicit aliases
     product_df = (
-        spark.read.table("rsclp_catalog.rsclp_productmaster_schema.product_master")
+        spark.read.table(f"{CATALOG}.rsclp_productmaster_schema.product_master")
         .filter(F.col("__END_AT").isNull())
         .select(
             F.col("ProductID").alias("pm_ProductID"), 
@@ -290,7 +290,7 @@ def supplier_orders_silver():
     
     # Supplier pricing with explicit aliases
     supplier_df = (
-        spark.read.table("rsclp_catalog.rsclp_productmaster_schema.supplier_costprice_history")
+        spark.read.table(f"{CATALOG}.rsclp_productmaster_schema.supplier_costprice_history")
         .filter(F.col("__END_AT").isNull())
         .select(
             F.col("ProductID").alias("sph_ProductID"), 
@@ -360,7 +360,7 @@ def supplier_orders_silver():
 
 # ==================== GOLD LAYER ====================
 @dlt.table(
-    name='rsclp_catalog.rsclp_gold_schema.supplier_orders',
+    name=f'{CATALOG}.rsclp_gold_schema.supplier_orders',
     comment='Gold: Aggregated by Supplier+DeliveryDate for PDF generation',
     partition_cols=["OrderDate"],
     table_properties={
@@ -401,7 +401,7 @@ def supplier_orders_gold():
         DataFrame: Aggregated orders by supplier
     """
     log("GOLD", "Aggregating by supplier")
-    orders_gold_df = dlt.read_stream("rsclp_catalog.rsclp_silver_schema.supplier_orders").select(
+    orders_gold_df = dlt.read_stream(f"{CATALOG}.rsclp_silver_schema.supplier_orders").select(
         "OrderID", "OrderDate", "ExpectedDeliveryDate",
         "SupplierID", "StoreID",
         "ProductID", "ProductName", "UnitOfMeasure",
@@ -413,7 +413,7 @@ def supplier_orders_gold():
 
 # ==================== QUARANTINE LAYER ====================
 @dlt.table(
-    name='rsclp_catalog.rsclp_invalid_data_schema.invalid_supplier_orders',
+    name=f'{CATALOG}.rsclp_invalid_data_schema.invalid_supplier_orders',
     comment='Quarantine: All invalid orders with reasons',
     partition_cols=['OrderDate'],
     table_properties={
@@ -446,11 +446,11 @@ def invalid_supplier_orders():
     exploded = dlt.read_stream("exploded_orders_view") 
 
     # Master tables (unchanged)
-    product_df = spark.read.table("rsclp_catalog.rsclp_productmaster_schema.product_master")\
+    product_df = spark.read.table(f"{CATALOG}.rsclp_productmaster_schema.product_master")\
         .filter(F.col("__END_AT").isNull())\
         .select(F.col("ProductID").alias("pm_ProductID")).cache()
     
-    supplier_df = spark.read.table("rsclp_catalog.rsclp_productmaster_schema.supplier_costprice_history")\
+    supplier_df = spark.read.table(f"{CATALOG}.rsclp_productmaster_schema.supplier_costprice_history")\
         .filter(F.col("__END_AT").isNull())\
         .select(F.col("ProductID").alias("sph_ProductID"), 
                 F.col("SupplierID").alias("sph_SupplierID"), 
@@ -563,10 +563,10 @@ def invalid_supplier_orders():
 
 
 # ==================== MONITORING VIEWS ====================
-@dlt.table(name='rsclp_catalog.rsclp_monitor_schema.invalid_orders_summary', comment='Monitoring: Aggregated invalid orders')
+@dlt.table(name=f'{CATALOG}.rsclp_monitor_schema.invalid_orders_summary', comment='Monitoring: Aggregated invalid orders')
 def invalid_orders_summary():
     return (
-        dlt.read_stream("rsclp_catalog.rsclp_invalid_data_schema.invalid_supplier_orders")
+        dlt.read_stream(f"{CATALOG}.rsclp_invalid_data_schema.invalid_supplier_orders")
         .withWatermark("LoadTimestamp", "1 hour")
         .groupBy("OrderDateCategory", "InvalidationType", "Reason")
         .agg(
@@ -575,10 +575,10 @@ def invalid_orders_summary():
             F.approx_count_distinct("SourceFileName").alias("AffectedFiles")
         )
     )
-@dlt.table(name='rsclp_catalog.rsclp_monitor_schema.orders_pipeline_metrics', comment='Monitoring: Pipeline health metrics')
+@dlt.table(name=f'{CATALOG}.rsclp_monitor_schema.orders_pipeline_metrics', comment='Monitoring: Pipeline health metrics')
 def orders_pipeline_metrics():
     silver = (
-        dlt.read_stream("rsclp_catalog.rsclp_silver_schema.supplier_orders")
+        dlt.read_stream(f"{CATALOG}.rsclp_silver_schema.supplier_orders")
         .withWatermark("LoadTimestamp", "1 hour")
         .withColumn("is_valid", F.lit(1))
         .withColumn("is_invalid", F.lit(0))
@@ -587,7 +587,7 @@ def orders_pipeline_metrics():
     )
     
     invalid = (
-        dlt.read_stream("rsclp_catalog.rsclp_invalid_data_schema.invalid_supplier_orders")
+        dlt.read_stream(f"{CATALOG}.rsclp_invalid_data_schema.invalid_supplier_orders")
         .withWatermark("LoadTimestamp", "1 hour")
         .withColumn("is_valid", F.lit(0))
         .withColumn("is_invalid", F.lit(1))
