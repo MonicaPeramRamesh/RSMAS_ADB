@@ -471,30 +471,25 @@ def invalid_daily_sales():
     # 3. Quality Violations
     # =====================================================================
     invalid_quality = (
-        exploded_stream.filter(
-            (F.col("ProductID").isNull()) |
-            (F.col("Quantity") <= 0) |
-            (F.col("UnitPrice") <= 0)
+    exploded_stream.filter(
+        (F.col("ProductID").isNull()) |
+        (F.col("ProductID") == "") |                    # Empty string check
+        (F.col("Quantity").isNull()) |                  # ✅ Explicit NULL check
+        (F.col("Quantity") <= 0) |
+        (F.col("UnitPrice").isNull()) |                 # ✅ Explicit NULL check
+        (F.col("UnitPrice") <= 0)
+    )
+    .withColumn(
+        "Reason",
+        F.concat_ws("; ",
+            F.when(F.col("ProductID").isNull() | (F.col("ProductID") == ""), F.lit("ProductID null")),
+            F.when(F.col("Quantity").isNull(), F.lit("Quantity null")),
+            F.when((F.col("Quantity").isNotNull()) & (F.col("Quantity") <= 0), F.lit("Quantity <=0")),
+            F.when(F.col("UnitPrice").isNull(), F.lit("UnitPrice null")),
+            F.when((F.col("UnitPrice").isNotNull()) & (F.col("UnitPrice") <= 0), F.lit("UnitPrice <=0"))
         )
-        .withColumn(
-            "Reason",
-            F.concat_ws("; ",
-                F.when(F.col("ProductID").isNull(), F.lit("ProductID null")),
-                F.when(F.col("Quantity") <= 0, F.lit("Quantity <=0")),
-                F.when(F.col("UnitPrice") <= 0, F.lit("UnitPrice <=0"))
-            )
-        )
-        .withColumn("InvalidationType", F.lit("QUALITY_VIOLATION"))
-        # Inlined TransactionDateCategory
-        .withColumn(
-            "TransactionDateCategory",
-            F.when(
-                (F.col("TransactionDate").isNull()) |
-                (F.col("TransactionDate") == "") |
-                (F.col("TransactionDate") == "-"),
-                folder_date_expr
-            ).otherwise(F.col("TransactionDate"))
-        )
+    )
+    .withColumn("InvalidationType", F.lit("QUALITY_VIOLATION"))
     )
 
     # =====================================================================
