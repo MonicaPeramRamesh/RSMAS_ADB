@@ -76,32 +76,32 @@ steps:
             $uploadBatPath = "$testBasePath/utils/upload_to_adls.bat"
             
             # Create notebook to execute the bat file
-            $uploadNotebook = @'
+            $pipelineNameEscaped = $pipelineName
+            $uploadNotebook = @"
 # Databricks notebook source
 import subprocess
 import os
 
 print("=" * 60)
-print("Running upload_to_adls.bat")
+print("Running upload_to_adls.bat for $pipelineNameEscaped")
 print("=" * 60)
 
-# Read the bat file content
-with open("/Workspace/Shared/Tests/{0}/utils/upload_to_adls.bat", "r") as f:
+bat_path = "/Workspace/Shared/Tests/$pipelineNameEscaped/utils/upload_to_adls.bat"
+with open(bat_path, "r") as f:
     commands = f.readlines()
 
-# Execute commands
 for cmd in commands:
     cmd = cmd.strip()
     if cmd and not cmd.startswith("@") and not cmd.startswith("REM"):
-        print(f"Executing: {{cmd}}")
+        print("Executing: " + cmd)
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         print(result.stdout)
         if result.returncode != 0:
-            print(f"Error: {{result.stderr}}")
-            raise Exception(f"Command failed: {{cmd}}")
+            print("Error: " + result.stderr)
+            raise Exception("Command failed: " + cmd)
 
-print("✅ upload_to_adls.bat completed successfully")
-'@ -f $pipelineName
+print("Upload completed successfully")
+"@
             
             $b64Content = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($uploadNotebook))
             
@@ -254,21 +254,20 @@ print("✅ upload_to_adls.bat completed successfully")
             $testsPath = "$testBasePath/tests"
             
             # Create test runner notebook
-            $testRunner = @'
+            $pipelineNameEscaped = $pipelineName
+            $testRunner = @"
 # Databricks notebook source
 import subprocess
 import sys
 import os
 
 print("=" * 60)
-print("Running Test Cases for {0}")
+print("Running Test Cases for $pipelineNameEscaped")
 print("=" * 60)
 
-# Install pytest
 subprocess.check_call([sys.executable, "-m", "pip", "install", "pytest", "pytest-html", "--quiet"])
 
-# Run tests
-test_path = "/Workspace/Shared/Tests/{0}/tests"
+test_path = "/Workspace/Shared/Tests/$pipelineNameEscaped/tests"
 result = subprocess.run(
     ["python", "-m", "pytest", test_path, "-v", "--tb=short", "--maxfail=1"],
     capture_output=True,
@@ -279,10 +278,10 @@ print(result.stdout)
 print(result.stderr)
 
 if result.returncode != 0:
-    raise Exception(f"Tests failed for {0}")
+    raise Exception("Tests failed for $pipelineNameEscaped")
 
-print("✅ All tests passed for {0}!")
-'@ -f $pipelineName
+print("All tests passed for $pipelineNameEscaped")
+"@
             
             $b64TestContent = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($testRunner))
             
