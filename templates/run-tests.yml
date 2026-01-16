@@ -76,7 +76,7 @@ steps:
             $uploadBatPath = "$testBasePath/utils/upload_to_adls.bat"
             
             # Create notebook to execute the bat file
-            $uploadNotebook = @"
+            $uploadNotebook = @'
 # Databricks notebook source
 import subprocess
 import os
@@ -86,22 +86,22 @@ print("Running upload_to_adls.bat")
 print("=" * 60)
 
 # Read the bat file content
-with open("/Workspace/Shared/Tests/$pipelineName/utils/upload_to_adls.bat", "r") as f:
+with open("/Workspace/Shared/Tests/{0}/utils/upload_to_adls.bat", "r") as f:
     commands = f.readlines()
 
 # Execute commands
 for cmd in commands:
     cmd = cmd.strip()
     if cmd and not cmd.startswith("@") and not cmd.startswith("REM"):
-        print(f"Executing: {cmd}")
+        print(f"Executing: {{cmd}}")
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         print(result.stdout)
         if result.returncode != 0:
-            print(f"Error: {result.stderr}")
-            raise Exception(f"Command failed: {cmd}")
+            print(f"Error: {{result.stderr}}")
+            raise Exception(f"Command failed: {{cmd}}")
 
 print("✅ upload_to_adls.bat completed successfully")
-"@
+'@ -f $pipelineName
             
             $b64Content = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($uploadNotebook))
             
@@ -254,21 +254,21 @@ print("✅ upload_to_adls.bat completed successfully")
             $testsPath = "$testBasePath/tests"
             
             # Create test runner notebook
-            $testRunner = @"
+            $testRunner = @'
 # Databricks notebook source
 import subprocess
 import sys
 import os
 
 print("=" * 60)
-print("Running Test Cases for $pipelineName")
+print("Running Test Cases for {0}")
 print("=" * 60)
 
 # Install pytest
 subprocess.check_call([sys.executable, "-m", "pip", "install", "pytest", "pytest-html", "--quiet"])
 
 # Run tests
-test_path = "/Workspace/Shared/Tests/$pipelineName/tests"
+test_path = "/Workspace/Shared/Tests/{0}/tests"
 result = subprocess.run(
     ["python", "-m", "pytest", test_path, "-v", "--tb=short", "--maxfail=1"],
     capture_output=True,
@@ -279,10 +279,10 @@ print(result.stdout)
 print(result.stderr)
 
 if result.returncode != 0:
-    raise Exception(f"Tests failed for $pipelineName")
+    raise Exception(f"Tests failed for {0}")
 
-print("✅ All tests passed for $pipelineName!")
-"@
+print("✅ All tests passed for {0}!")
+'@ -f $pipelineName
             
             $b64TestContent = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($testRunner))
             
