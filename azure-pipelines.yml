@@ -48,8 +48,6 @@ stages:
       - job: RunTestsDev
         displayName: 'Execute Test Suite in DEV'
         steps:
-          - checkout: self
-          - checkout: TestRepo
           - template: templates/run-tests.yml
             parameters:
               environment: 'DEV'
@@ -117,8 +115,6 @@ stages:
       - job: RunTestsTest
         displayName: 'Execute Test Suite in TEST'
         steps:
-          - checkout: self
-          - checkout: TestRepo
           - template: templates/run-tests.yml
             parameters:
               environment: 'TEST'
@@ -188,8 +184,6 @@ stages:
       - job: RunTestsProd
         displayName: 'Execute Test Suite in PROD'
         steps:
-          - checkout: self
-          - checkout: TestRepo
           - template: templates/run-tests.yml
             parameters:
               environment: 'PROD'
