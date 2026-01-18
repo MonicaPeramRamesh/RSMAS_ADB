@@ -16,11 +16,38 @@ steps:
         Write-Host "  Discovering Test Pipelines in ${{ parameters.environment }}"
         Write-Host "============================================================"
         
-        $src = "$(Build.SourcesDirectory)"
-        $pipelinesDir = Join-Path $src "pipelines"
+        # The TestRepo is checked out to a subdirectory
+        # Find the correct source directory
+        $buildDir = "$(Build.SourcesDirectory)"
+        Write-Host "Build directory: $buildDir"
+        
+        # List contents to see what we have
+        Write-Host "`nDirectory contents:"
+        Get-ChildItem $buildDir | ForEach-Object { Write-Host "  - $($_.Name)" }
+        
+        # The test repository should be in a subdirectory named after the repository resource
+        $testRepoDir = Join-Path $buildDir "TestRepo"
+        
+        if (-not (Test-Path $testRepoDir)) {
+          # Try alternate location
+          $testRepoDir = Join-Path $buildDir "RSCLP_TEST"
+        }
+        
+        if (-not (Test-Path $testRepoDir)) {
+          Write-Host "`n❌ Error: Test repository not found!" -ForegroundColor Red
+          Write-Host "Checked locations:" -ForegroundColor Red
+          Write-Host "  - $(Join-Path $buildDir 'TestRepo')" -ForegroundColor Red
+          Write-Host "  - $(Join-Path $buildDir 'RSCLP_TEST')" -ForegroundColor Red
+          exit 1
+        }
+        
+        Write-Host "`n✅ Found test repository at: $testRepoDir"
+        
+        $pipelinesDir = Join-Path $testRepoDir "pipelines"
         
         if (-not (Test-Path $pipelinesDir)) {
-          Write-Host "❌ Error: 'pipelines' directory not found!" -ForegroundColor Red
+          Write-Host "❌ Error: 'pipelines' directory not found in test repository!" -ForegroundColor Red
+          Write-Host "Path checked: $pipelinesDir" -ForegroundColor Red
           exit 1
         }
         
@@ -68,7 +95,7 @@ steps:
           Write-Host "🧪 Testing Pipeline: $pipelineName"
           Write-Host "============================================================"
           
-          $testBasePath = "/Workspace/Shared/Tests/$pipelineName"
+          $testBasePath = "/Workspace/Shared/Tests/pipelines/$pipelineName"
           
           # Step 1: Run upload_to_adls.bat
           Write-Host "`n📤 Step 1: Running upload_to_adls.bat..."
