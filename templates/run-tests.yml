@@ -8,7 +8,7 @@ parameters:
 
 steps:
   - task: PowerShell@2
-    displayName: 'Discover and Run Tests'
+    displayName: 'Discover and Run Tests in ${{ parameters.environment }}'
     inputs:
       targetType: 'inline'
       script: |
@@ -21,214 +21,270 @@ steps:
           "Content-Type" = "application/json"
         }
         
-        # Discover pipelines from Databricks Tests folder
+        # ========================================================
+        # STEP 1: Discover Test Pipelines
+        # ========================================================
         Write-Host "`n📋 Discovering test pipelines from Databricks..."
         
         try {
           $testsPath = [uri]::EscapeDataString("/Workspace/Shared/Tests/pipelines")
-          $testsFolders = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/workspace/list?path=$testsPath" `
+          $testResult = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/workspace/list?path=$testsPath" `
             -Headers $headers `
             -Method Get
           
-          $pipelineFolders = $testsFolders.objects | Where-Object { $_.object_type -eq "DIRECTORY" }
+          $pipelineFolders = $testResult.objects | Where-Object { $_.object_type -eq "DIRECTORY" }
+          
+          if ($pipelineFolders.Count -eq 0) {
+            Write-Host "⚠️  No test pipelines found in /Workspace/Shared/Tests/pipelines" -ForegroundColor Yellow
+            exit 0
+          }
           
           Write-Host "✅ Found $($pipelineFolders.Count) pipeline(s) to test:"
-          foreach ($pf in $pipelineFolders) {
-            $pipelineName = Split-Path $pf.path -Leaf
-            Write-Host "  - $pipelineName"
+          foreach ($folder in $pipelineFolders) {
+            Write-Host "  - $($folder.path.Split('/')[-1])"
           }
           
         } catch {
-          Write-Host "❌ Error discovering test pipelines: $($_.Exception.Message)" -ForegroundColor Red
-          Write-Host "Make sure RSCLP_TEST pipeline has deployed tests to /Workspace/Shared/Tests/pipelines/" -ForegroundColor Yellow
+          Write-Host "❌ Failed to discover test pipelines: $($_.Exception.Message)" -ForegroundColor Red
           exit 1
         }
         
-        if ($pipelineFolders.Count -eq 0) {
-          Write-Host "⚠️  No test pipelines found. Skipping test execution." -ForegroundColor Yellow
-          exit 0
-        }
+        Write-Host "============================================================"
         
-        $allTestsPassed = $true
+        # ========================================================
+        # STEP 2: Run Tests for Each Pipeline (Serverless)
+        # ========================================================
+        $totalTests = 0
+        $passedTests = 0
+        $failedTests = 0
         $testResults = @()
         
-        # Run tests for each pipeline
-        foreach ($pf in $pipelineFolders) {
-          $pipelineName = Split-Path $pf.path -Leaf
+        foreach ($pipelineFolder in $pipelineFolders) {
+          $pipelineName = $pipelineFolder.path.Split('/')[-1]
           
-          Write-Host "`n============================================================"
-          Write-Host "🧪 Testing Pipeline: $pipelineName"
+          Write-Host "`n🧪 Testing Pipeline: $pipelineName"
           Write-Host "============================================================"
           
-          $runTestsNotebook = "/Workspace/Shared/Tests/pipelines/$pipelineName/utils/run_tests.ipynb"
+          # Check if run_tests.ipynb exists
+          $notebookPath = "$($pipelineFolder.path)/utils/run_tests.ipynb"
           
-          # Check if run_tests notebook exists
-          Write-Host "`n📓 Looking for test notebook at: $runTestsNotebook"
+          Write-Host "📓 Looking for test notebook at: $notebookPath"
           
           try {
-            $notebookPath = [uri]::EscapeDataString($runTestsNotebook)
-            $notebookCheck = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/workspace/get-status?path=$notebookPath" `
+            $encodedNotebookPath = [uri]::EscapeDataString($notebookPath)
+            $notebookCheck = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/workspace/get-status?path=$encodedNotebookPath" `
               -Headers $headers `
-              -Method Get
+              -Method Get `
+              -ErrorAction Stop
             
             Write-Host "  ✅ Found test notebook"
-            
           } catch {
-            Write-Host "  ⚠️  run_tests notebook not found at $runTestsNotebook" -ForegroundColor Yellow
-            Write-Host "  Skipping tests for $pipelineName"
-            $testResults += @{
+            Write-Host "  ❌ Test notebook not found at: $notebookPath" -ForegroundColor Red
+            $failedTests++
+            $testResults += [PSCustomObject]@{
               Pipeline = $pipelineName
-              Status = "SKIPPED"
+              Status = "FAILED"
+              Reason = "Test notebook not found"
+              Duration = "0s"
             }
             continue
           }
           
-          # Run the test notebook
-          Write-Host "`n🚀 Running tests for $pipelineName..."
+          # ========================================================
+          # Run Notebook Using Serverless (No Cluster Config!)
+          # ========================================================
+          Write-Host "🚀 Running tests for $pipelineName (serverless)..."
           
           try {
-            $testJobBody = @{
-              run_name = "Tests_${pipelineName}_${{ parameters.environment }}_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+            # Simple job configuration - serverless by default
+            $jobConfig = @{
+              run_name = "Test_${pipelineName}_${{ parameters.environment }}_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+              timeout_seconds = 3600  # 1 hour timeout
               tasks = @(
                 @{
                   task_key = "run_tests"
                   notebook_task = @{
-                    notebook_path = $runTestsNotebook
+                    notebook_path = $notebookPath
+                    base_parameters = @{
+                      environment = "${{ parameters.environment }}"
+                      pipeline_name = $pipelineName
+                    }
                   }
-                  new_cluster = @{
-                    spark_version = "13.3.x-scala2.12"
-                    node_type_id = "Standard_DS3_v2"
-                    num_workers = 1
-                  }
-                  timeout_seconds = 3600
                 }
               )
             } | ConvertTo-Json -Depth 10
             
-            $testRun = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.1/jobs/runs/submit" `
+            # Submit the job
+            $jobResponse = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.1/jobs/runs/submit" `
               -Headers $headers `
               -Method Post `
-              -Body $testJobBody
+              -Body $jobConfig
             
-            $testRunId = $testRun.run_id
-            Write-Host "  ✅ Test job submitted (Run ID: $testRunId)"
-            Write-Host "  📍 Job URL: ${{ parameters.databricksHost }}/#job/$testRunId"
+            $runId = $jobResponse.run_id
+            Write-Host "  ✅ Test job submitted (Run ID: $runId)"
+            Write-Host "  📍 Job URL: ${{ parameters.databricksHost }}/#job/$runId"
             
-            # Wait for test completion
-            $maxWaitTest = 60
-            $startTimeTest = Get-Date
-            $testCompleted = $false
+            # ========================================================
+            # Monitor Job Execution
+            # ========================================================
+            $maxWaitMinutes = 30
+            $pollIntervalSeconds = 10
+            $maxPolls = ($maxWaitMinutes * 60) / $pollIntervalSeconds
+            $pollCount = 0
+            $startTime = Get-Date
             
-            while (-not $testCompleted) {
-              Start-Sleep -Seconds 15
+            $finalState = $null
+            $finalResult = $null
+            
+            while ($pollCount -lt $maxPolls) {
+              Start-Sleep -Seconds $pollIntervalSeconds
+              $pollCount++
               
-              $testStatus = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.1/jobs/runs/get?run_id=$testRunId" `
-                -Headers $headers `
-                -Method Get
-              
-              $testState = $testStatus.state.life_cycle_state
-              $resultState = if ($testStatus.state.result_state) { $testStatus.state.result_state } else { "RUNNING" }
-              
-              Write-Host "  ⏳ Status: $testState | Result: $resultState"
-              
-              if ($testState -eq "TERMINATED") {
-                $testCompleted = $true
+              try {
+                $runStatus = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.1/jobs/runs/get?run_id=$runId" `
+                  -Headers $headers `
+                  -Method Get
                 
-                if ($resultState -ne "SUCCESS") {
-                  Write-Host "  ❌ Tests failed!" -ForegroundColor Red
-                  
-                  # Try to get error details
-                  try {
-                    $output = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.1/jobs/runs/get-output?run_id=$testRunId" `
-                      -Headers $headers `
-                      -Method Get
-                    
-                    if ($output.error) {
-                      Write-Host "  Error: $($output.error)" -ForegroundColor Red
-                    }
-                    if ($output.metadata -and $output.metadata.state -and $output.metadata.state.state_message) {
-                      Write-Host "  Message: $($output.metadata.state.state_message)" -ForegroundColor Red
-                    }
-                  } catch {
-                    Write-Host "  Could not retrieve detailed error information"
+                $state = $runStatus.state.life_cycle_state
+                $result = $runStatus.state.result_state
+                
+                # Calculate elapsed time
+                $elapsed = [math]::Round(((Get-Date) - $startTime).TotalSeconds)
+                
+                # Show progress
+                if ($state -in @("PENDING", "RUNNING", "TERMINATING")) {
+                  $stateMessage = ""
+                  if ($runStatus.state.state_message) {
+                    $stateMessage = " | $($runStatus.state.state_message)"
                   }
-                  
-                  $allTestsPassed = $false
-                  $testResults += @{
-                    Pipeline = $pipelineName
-                    Status = "FAILED"
-                    RunId = $testRunId
-                  }
+                  Write-Host "  ⏳ Status: $state | Elapsed: ${elapsed}s$stateMessage"
                 } else {
-                  Write-Host "  ✅ All tests passed!" -ForegroundColor Green
-                  $testResults += @{
-                    Pipeline = $pipelineName
-                    Status = "PASSED"
-                    RunId = $testRunId
-                  }
+                  # Job finished
+                  $finalState = $state
+                  $finalResult = $result
+                  break
                 }
-              }
-              
-              $elapsedTest = (Get-Date) - $startTimeTest
-              if ($elapsedTest.TotalMinutes -gt $maxWaitTest) {
-                Write-Host "  ❌ Test execution timed out after $maxWaitTest minutes" -ForegroundColor Red
-                $allTestsPassed = $false
-                $testResults += @{
-                  Pipeline = $pipelineName
-                  Status = "TIMEOUT"
-                  RunId = $testRunId
-                }
-                break
+                
+              } catch {
+                Write-Host "  ⚠️  Error polling job status: $($_.Exception.Message)" -ForegroundColor Yellow
+                Start-Sleep -Seconds 5
               }
             }
+            
+            # ========================================================
+            # Process Results
+            # ========================================================
+            $duration = [math]::Round(((Get-Date) - $startTime).TotalSeconds)
+            
+            if ($null -eq $finalState) {
+              Write-Host "`n  ❌ Test timed out after $maxWaitMinutes minutes" -ForegroundColor Red
+              $failedTests++
+              $testResults += [PSCustomObject]@{
+                Pipeline = $pipelineName
+                Status = "TIMEOUT"
+                Reason = "Exceeded ${maxWaitMinutes}m timeout"
+                Duration = "${duration}s"
+                RunId = $runId
+              }
+            }
+            elseif ($finalResult -eq "SUCCESS") {
+              Write-Host "`n  ✅ Tests PASSED for $pipelineName (${duration}s)" -ForegroundColor Green
+              $passedTests++
+              $testResults += [PSCustomObject]@{
+                Pipeline = $pipelineName
+                Status = "PASSED"
+                Reason = "All tests successful"
+                Duration = "${duration}s"
+                RunId = $runId
+              }
+            }
+            else {
+              # Get error details
+              $errorMsg = "Unknown error"
+              if ($runStatus.state.state_message) {
+                $errorMsg = $runStatus.state.state_message
+              }
+              
+              # Try to get task error details
+              if ($runStatus.tasks -and $runStatus.tasks[0].state.result_state -eq "FAILED") {
+                if ($runStatus.tasks[0].state.state_message) {
+                  $errorMsg = $runStatus.tasks[0].state.state_message
+                }
+              }
+              
+              Write-Host "`n  ❌ Tests FAILED for $pipelineName" -ForegroundColor Red
+              Write-Host "     State: $finalState | Result: $finalResult"
+              Write-Host "     Error: $errorMsg" -ForegroundColor Red
+              
+              $failedTests++
+              $testResults += [PSCustomObject]@{
+                Pipeline = $pipelineName
+                Status = "FAILED"
+                Reason = "$finalState | $finalResult"
+                Error = $errorMsg
+                Duration = "${duration}s"
+                RunId = $runId
+              }
+            }
+            
+            $totalTests++
             
           } catch {
-            Write-Host "  ❌ Test execution failed: $($_.Exception.Message)" -ForegroundColor Red
-            $allTestsPassed = $false
-            $testResults += @{
+            Write-Host "`n  ❌ Failed to run tests: $($_.Exception.Message)" -ForegroundColor Red
+            $failedTests++
+            $testResults += [PSCustomObject]@{
               Pipeline = $pipelineName
               Status = "ERROR"
-              Error = $_.Exception.Message
+              Reason = $_.Exception.Message
+              Duration = "0s"
             }
           }
+          
+          Write-Host "============================================================"
         }
         
+        # ========================================================
         # Final Summary
-        Write-Host "`n============================================================"
+        # ========================================================
+        Write-Host "`n"
+        Write-Host "============================================================"
         Write-Host "  TEST EXECUTION SUMMARY - ${{ parameters.environment }}"
         Write-Host "============================================================"
-        Write-Host "`nResults by Pipeline:"
+        Write-Host "  Total Pipelines Tested: $totalTests"
+        Write-Host "  Passed:                 $passedTests" -ForegroundColor Green
+        Write-Host "  Failed:                 $failedTests" -ForegroundColor $(if($failedTests -gt 0){'Red'}else{'Green'})
+        Write-Host "============================================================"
         
-        foreach ($result in $testResults) {
-          $icon = switch ($result.Status) {
-            "PASSED" { "✅"; break }
-            "FAILED" { "❌"; break }
-            "TIMEOUT" { "⏱️"; break }
-            "SKIPPED" { "⏭️"; break }
-            "ERROR" { "❌"; break }
-            default { "❓" }
+        if ($testResults.Count -gt 0) {
+          Write-Host "`nDetailed Results:"
+          Write-Host "------------------------------------------------------------"
+          foreach ($result in $testResults) {
+            $statusColor = if ($result.Status -eq "PASSED") { "Green" } else { "Red" }
+            Write-Host "  Pipeline: $($result.Pipeline)" -ForegroundColor Cyan
+            Write-Host "    Status:   $($result.Status)" -ForegroundColor $statusColor
+            Write-Host "    Duration: $($result.Duration)"
+            if ($result.RunId) {
+              Write-Host "    Run ID:   $($result.RunId)"
+              Write-Host "    Job URL:  ${{ parameters.databricksHost }}/#job/$($result.RunId)"
+            }
+            if ($result.Status -ne "PASSED") {
+              Write-Host "    Reason:   $($result.Reason)" -ForegroundColor Yellow
+              if ($result.Error) {
+                Write-Host "    Details:  $($result.Error)" -ForegroundColor Yellow
+              }
+            }
+            Write-Host ""
           }
-          
-          $color = if ($result.Status -eq "PASSED") { "Green" } elseif ($result.Status -eq "SKIPPED") { "Yellow" } else { "Red" }
-          
-          $message = "  $icon $($result.Pipeline): $($result.Status)"
-          if ($result.RunId) {
-            $message += " (Run ID: $($result.RunId))"
-          }
-          if ($result.Error) {
-            $message += " - $($result.Error)"
-          }
-          
-          Write-Host $message -ForegroundColor $color
         }
         
-        Write-Host "`n============================================================"
-        if ($allTestsPassed) {
-          Write-Host "✅ ALL TESTS PASSED SUCCESSFULLY!" -ForegroundColor Green
-          Write-Host "============================================================"
-          exit 0
-        } else {
-          Write-Host "❌ SOME TESTS FAILED!" -ForegroundColor Red
-          Write-Host "============================================================"
+        Write-Host "============================================================"
+        
+        # Exit with error if any tests failed
+        if ($failedTests -gt 0) {
+          Write-Host "❌ $failedTests test(s) failed. Please review the results above." -ForegroundColor Red
+          Write-Host "`n💡 Tip: Click the Job URLs above to see detailed error logs in Databricks" -ForegroundColor Cyan
           exit 1
         }
+        
+        Write-Host "✅ All tests passed successfully in ${{ parameters.environment }}!" -ForegroundColor Green
+        Write-Host "============================================================"
